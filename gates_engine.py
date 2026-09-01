@@ -1,58 +1,44 @@
 #!/usr/bin/env python3
 """
-LODHA GCR — DETERMINISTIC ENGINE (no Anthropic API calls, no API key)
+LODHA GCR — DETERMINISTIC ENGINE, OAuth edition (no service account, no
+Apps Script bridge, no Google Cloud IAM)
 
-This file does NOT research anything and NEVER calls a model. It exists so
-the parts that must be deterministic and mechanical — sheet reads/writes,
-gate math, the evidence workbook, Drive upload — are exact code, not tokens.
+Authenticates as YOU, via the refresh token in token.json, produced once
+through the OAuth consent flow. Reads and writes the Sheet and Drive with
+your own existing access — nothing is shared with any other identity, so
+the Workspace admin's external-sharing policy never enters into it, and
+there is no Apps Script deployment-access wall to fight.
 
-The RESEARCH is done by the routine's own Claude Code agent, using its own
-web-search tool, which runs on your Claude Code / claude.ai subscription
-quota rather than a separate pay-per-token API key. See ROUTINE_PROMPT.md
-for the exact instructions the agent follows and the CLI contract below.
+This file does no research and never calls a model. Research is done by
+the routine's own Claude Code agent (see ROUTINE_PROMPT.md), which is what
+keeps model usage on your subscription quota rather than a separate API
+bill. This file only does the parts that must be exact code: sheet reads
+and writes, the gate math, the evidence workbook, the Drive upload.
 
-CLI (each subcommand prints one JSON object to stdout):
+CLI (unchanged contract from earlier versions — same subcommands
+ROUTINE_PROMPT.md already calls):
 
   read_queue
-      -> {"rows":[{"row":7,"reference":"GCR-...","sub":{...}}, ...]}
-      Lists leads at QUEUED, plus any stuck at ENRICHING for >30 min.
-
   claim --row N
-      Marks row N ENRICHING and stamps Last Run. Call before researching it.
-
   evaluate --sub '<json>' --anchor '<json>' --ledger '<json>'
-      -> {"gates":[...], "verdict":"Green|Amber|Red"}
-      Pure gate math — ticket-scaled, multi-route capacity, exactly the
-      logic in Code.gs. The agent supplies findings; this decides the rating.
-      The rating is computed here and ONLY here — the agent explains it,
-      never sets it.
-
   workbook --sub '<json>' --anchor '<json>' --ledger '<json>' --notes '<json>'
-      -> {"url":"https://docs.google.com/..."}
-      Builds the Alibaug-format evidence xlsx and uploads it to Drive.
-
   writeback --row N --verdict V --confidence C --summary S --reasoning R
              --gaps '["...","..."]' --escalations E --evidence_url U
-      Writes the profile back to the row and sets Status=PENDING_APPROVAL.
-      (Committee email stays in Apps Script's notifyPending — unchanged.)
-
   fail --row N --reason "..."
-      Sets Status=FAILED and records the reason in Run Log.
 
 ENVIRONMENT
-  GCR_SHEET_ID        required
-  GCR_DRIVE_FOLDER    optional — Drive folder ID for evidence workbooks
-  GOOGLE_SA_JSON       the service-account JSON as one line, OR
-  GOOGLE_APPLICATION_CREDENTIALS   a path to the JSON file
+  GCR_SHEET_ID       required — the spreadsheet ID from its URL
+  GCR_DRIVE_FOLDER   optional — Drive folder ID for evidence workbooks
+  GOOGLE_OAUTH_TOKEN the full contents of token.json, as one line
 
-  pip install google-api-python-client google-auth openpyxl
-  (deliberately no `anthropic` package — this file never imports it)
+  pip install google-auth google-auth-oauthlib google-api-python-client openpyxl
 """
 
 import argparse, json, os, re, sys
 from datetime import datetime, timezone
 
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from openpyxl import Workbook
@@ -74,11 +60,6 @@ BANDS = [("\u20B9200 \u2013 300 Cr", 200), ("\u20B9300 \u2013 500 Cr", 300),
          ("More than one floor", 750)]
 NF, CPSRC = "Not found in public sources", "Channel partner form"
 MONS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-NICE = {"g1":"political connections", "g2":"links to a property developer",
-        "g3":"practising as a lawyer", "g4":"working as a journalist",
-        "5c":"court cases involving him or his fellow directors",
-        "5d":"court cases involving his family", "e4":"tax or regulatory action",
-        "e5":"unpaid debts or insolvency", "anchorConflict":"a clash with an existing occupier"}
 
 def now_iso(): return datetime.now(timezone.utc).isoformat()
 def dmy(dt=None):
@@ -86,16 +67,32 @@ def dmy(dt=None):
     return f"{dt.day:02d}/{MONS[dt.month-1]}/{dt.year}"
 def col(idx0): return get_column_letter(idx0 + 1)
 
-# ---------------------------------------------------------------- Google IO
+# ---------------------------------------------------------------- auth
 
 def gauth():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets",
-              "https://www.googleapis.com/auth/drive"]
-    raw = os.environ.get("GOOGLE_SA_JSON", "").strip()
-    creds = (service_account.Credentials.from_service_account_info(json.loads(raw), scopes=scopes)
-             if raw else
-             service_account.Credentials.from_service_account_file(
-                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"], scopes=scopes))
+    """Loads token.json's contents from GOOGLE_OAUTH_TOKEN, refreshes the
+    access token if needed, and returns Sheets + Drive clients. No service
+    account file, no IAM, no Drive/Sheets sharing with anyone — this
+    credential is you."""
+    raw = os.environ.get("GOOGLE_OAUTH_TOKEN", "").strip()
+    if not raw:
+        print("GOOGLE_OAUTH_TOKEN is not set (paste the contents of token.json as one line)", file=sys.stderr)
+        sys.exit(2)
+    data = json.loads(raw)
+    scopes = data.get("scopes") or ["https://www.googleapis.com/auth/spreadsheets",
+                                    "https://www.googleapis.com/auth/drive"]
+    creds = Credentials(
+        token=data.get("token"),
+        refresh_token=data["refresh_token"],
+        token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
+        client_id=data["client_id"],
+        client_secret=data["client_secret"],
+        scopes=scopes,
+    )
+    # The access token in token.json (if any) is almost certainly expired by
+    # the time a scheduled run fires; refresh unconditionally rather than
+    # trusting a timestamp that may not even be present.
+    creds.refresh(GoogleRequest())
     return build("sheets", "v4", credentials=creds), build("drive", "v3", credentials=creds)
 
 def read_all(sheets, tab):
@@ -430,7 +427,6 @@ def cmd_workbook(a):
     sub = json.loads(a.sub); anchor = json.loads(a.anchor) if a.anchor else {}
     ledger = json.loads(a.ledger); notes = json.loads(a.notes) if a.notes else {}
     path = write_workbook(build_rows(sub, anchor, ledger, notes), sub)
-    url = ""
     try:
         url = upload_to_drive(drive, path, sub["reference"])
     except Exception as e:
