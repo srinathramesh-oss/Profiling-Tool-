@@ -54,10 +54,58 @@ ST = dict(QUEUED="QUEUED", ENRICHING="ENRICHING", PENDING="PENDING_APPROVAL", FA
 
 CONFIG_DEFAULTS = dict(identityMin=0.60, baseTicketCr=200, baseTurnoverFloorCr=500,
                        baseNetWorthFloorCr=200, capacityRedBelowRatio=0.5,
-                       developerCarveOutCr=500)
-BANDS = [("\u20B9200 \u2013 300 Cr", 200), ("\u20B9300 \u2013 500 Cr", 300),
-         ("\u20B9500 \u2013 750 Cr", 500), ("Above \u20B9750 Cr", 750),
-         ("More than one floor", 750)]
+                       developerCarveOutCr=500, materialityCr=1)
+# (label, ticket Cr, matching floor-area band) — area at Rs 20,000/sq ft
+BANDS = [("\u20B9200 \u2013 300 Cr", 200, "1,00,000 \u2013 1,50,000 sq ft"),
+         ("\u20B9300 \u2013 500 Cr", 300, "1,50,000 \u2013 2,50,000 sq ft"),
+         ("\u20B9500 \u2013 750 Cr", 500, "2,50,000 \u2013 3,75,000 sq ft"),
+         ("Above \u20B9750 Cr",       750, "Above 3,75,000 sq ft")]
+
+TAX_MATTER = re.compile(r"\b(gst|goods and services tax|income[- ]tax|tax demand|tax notice|show[- ]cause|assessment order|adjudication order|input tax credit|customs|excise|vat|service tax|tds|transfer pricing)\b", re.I)
+CONVICTION = re.compile(r"\b(convicted|conviction|found guilty|pleaded guilty|sentenced|rigorous imprisonment|criminal breach of trust|debarred|disqualified as a director|barred from (?:trading|the securities market|holding))\b", re.I)
+EXONERATION = re.compile(r"\b(acquitted|acquittal|exonerated|discharged|quashed|set aside|closure report|no case (?:was )?made out)\b", re.I)
+CONSUMER = re.compile(r"\b(consumer (?:court|forum|commission|dispute|redressal)|district commission|state commission|ncdrc|deficiency in service|small claims)\b", re.I)
+
+def _txt(f): return f"{(f or {}).get('value','')} {(f or {}).get('note','')}"
+def is_tax(f): return bool(f) and bool(TAX_MATTER.search(_txt(f)))
+def is_conviction(f): return bool(f) and bool(CONVICTION.search(_txt(f)))
+def is_exonerated(f): return bool(f) and bool(EXONERATION.search(_txt(f)))
+def is_weak_source(f): return bool(f) and str(f.get("tier","")).lower() == "unverified"
+def is_foreign_affiliate(f):
+    if not f or str(f.get("jurisdiction","")).lower() != "foreign": return False
+    return str(f.get("about","subject")).lower() != "subject"
+def amount_cr(text):
+    t = str(text or "").replace(",", "")
+    m = re.search(r"(?:rs\.?|inr|\u20B9)\s*([\d.]+)\s*(lakh\s*crore|crore|cr\b|lakhs?)?", t, re.I)
+    if not m: return None
+    try: n = float(m.group(1))
+    except ValueError: return None
+    unit = (m.group(2) or "").lower()
+    if unit.startswith("lakh crore"): return n * 100000
+    if unit.startswith("crore") or unit == "cr": return n
+    if unit.startswith("lakh"): return n / 100
+    return n / 10000000
+def is_minor(f, cfg):
+    if not f: return False
+    if CONSUMER.search(_txt(f)): return True
+    a = amount_cr(_txt(f))
+    return a is not None and a < cfg["materialityCr"]
+
+def fmt_cr(cr):
+    if cr is None: return ""
+    n = round(cr) if cr >= 100 else round(cr, 1)
+    s = str(n); ip, _, dec = s.partition(".")
+    if len(ip) > 3:
+        last3, rest = ip[-3:], ip[:-3]
+        rest = re.sub(r"\B(?=(\d{2})+(?!\d))", ",", rest)
+        ip = rest + "," + last3
+    return "\u20B9" + ip + ("." + dec if dec else "") + " Cr"
+def ticket_for(sub):
+    area = (sub or {}).get("area", "")
+    for lbl, tk, ar in BANDS:
+        if ar == area: return tk
+    budget = (sub or {}).get("budget", "")
+    return next((b[1] for b in BANDS if b[0] == budget), BANDS[0][1])
 NF, CPSRC = "Not found in public sources", "Channel partner form"
 MONS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
@@ -127,7 +175,7 @@ def cr_from(text):
     m = re.search(r"([\d.]+)\s*(crore|cr\b)", t, re.I)
     return float(m.group(1)) if m else None
 
-def evaluate_gates(ledger, anchor, budget, cfg):
+def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
     G = []
     def get(fid):
         f = ledger.get(fid)
@@ -142,8 +190,6 @@ def evaluate_gates(ledger, anchor, budget, cfg):
     def required_for(ticket):
         k = ticket / cfg["baseTicketCr"]
         return cfg["baseTurnoverFloorCr"] * k, cfg["baseNetWorthFloorCr"] * k
-    def band_for(label):
-        return next((b for b in BANDS if b[0] == label), BANDS[0])
 
     turn = get("6b");  cr  = cr_from(turn["value"]) if turn else None
     worth = get("3a"); wcr = cr_from(worth["value"]) if worth else None
@@ -151,57 +197,129 @@ def evaluate_gates(ledger, anchor, budget, cfg):
     if liq_cr is not None and (wcr is None or liq_cr > wcr): wcr = liq_cr
     elif liq and wcr is None: wcr = cfg["baseNetWorthFloorCr"]
 
-    band = band_for(budget or "")
-    need_t, need_w = required_for(band[1])
+    ticket = ticket_for(sub or {"budget": budget})
+    need_t, need_w = required_for(ticket)
     best = None
-    for lbl, tk in BANDS:
+    for lbl, tk, _ar in BANDS:
         nt, nw = required_for(tk)
         if ((cr is not None and cr >= nt) or (wcr is not None and wcr >= nw)) and (best is None or tk > best[1]):
             best = (lbl, tk)
     routes = []
-    if cr is not None and cr >= need_t: routes.append(f"turnover {turn['value']}")
-    if worth and wcr is not None and wcr >= need_w: routes.append(f"net worth {worth['value']}")
-    if liq and wcr is not None and wcr >= need_w: routes.append(f"liquidity event — {liq['value']}")
+    if cr is not None and cr >= need_t: routes.append(f"turnover {fmt_cr(cr)}")
+    if worth and wcr is not None and wcr >= need_w: routes.append(f"net worth {fmt_cr(wcr)}")
+    if liq and wcr is not None and wcr >= need_w and not worth: routes.append("liquidity event")
+    need_txt = f"needs {fmt_cr(need_t)}"
 
     if routes:
-        add("capacity", "Capacity against ticket", "pass",
-            f"{'; '.join(routes)} — against Rs {need_t:g} Cr turnover or Rs {need_w:g} Cr net worth for a {band[0]} unit")
+        add("capacity", "Capacity against ticket", "pass", ", ".join(routes) + " \u00b7 " + need_txt)
     elif best:
         add("capacity", "Capacity against ticket", "qualifies lower",
-            f"supports a {best[0]} unit, not the {band[0]} unit asked about"
-            + (f" — turnover Rs {cr:g} Cr" if cr is not None else "")
-            + (f", net worth Rs {wcr:g} Cr" if wcr is not None else ""), True)
+            f"supports {best[0]}, not the {fmt_cr(ticket)} asked for", True)
     elif cr is None and wcr is None:
-        add("capacity", "Capacity against ticket", "not established",
-            "no filed turnover, net worth or liquidity event found — confirm in the meeting")
+        add("capacity", "Capacity against ticket", "not established", "no turnover, net worth or liquidity event found")
     elif cr is not None and cr < cfg["baseTurnoverFloorCr"] * cfg["capacityRedBelowRatio"]:
         add("capacity", "Capacity against ticket", "far below",
-            f"Rs {cr:g} Cr turnover, short of even the smallest unit at Rs {cfg['baseTurnoverFloorCr']:g} Cr, and no other route found")
+            f"{fmt_cr(cr)} turnover \u00b7 smallest unit needs {fmt_cr(cfg['baseTurnoverFloorCr'])}")
     else:
-        add("capacity", "Capacity against ticket", "short",
-            f"Rs {(cr if cr is not None else wcr):g} Cr against Rs {cfg['baseTurnoverFloorCr']:g} Cr for the smallest unit, and filings lag by a year or more")
+        add("capacity", "Capacity against ticket", "short", f"{fmt_cr(cr if cr is not None else wcr)} \u00b7 {need_txt}")
 
     for fid, label in [("g1","Politically exposed person"),("g2","Real estate developer interest"),
-                       ("g3","Practising lawyer"),("g4","Journalist")]:
+                       ("g3","Practising lawyer"),("g4","Journalist"),("g5","Public visibility")]:
         f = get(fid)
         if not f: add(fid, label, "nothing found", "no match in the sources searched"); continue
         if fid == "g2" and cr is not None and cr >= cfg["developerCarveOutCr"]:
-            add(fid, label, "exception applies", f"{f['value']} — above the Rs {cfg['developerCarveOutCr']:g} cr carve-out"); continue
+            add(fid, label, "exception applies", f"{f['value']} \u2014 above the {fmt_cr(cfg['developerCarveOutCr'])} carve-out"); continue
         add(fid, label, "for the screening authority", f["value"], True)
 
-    for fid, label in [("5c","Litigation, individual or co-directors"),("e4","Regulatory or tax proceedings"),
+    # tax and regulatory: to the committee, never a Red on its own
+    f = get("e4")
+    if not f: add("e4", "Regulatory or tax proceedings", "nothing found", "no match in the sources searched")
+    else:
+        sev = (f.get("severity") or "mention").lower()
+        if sev == "mention": add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 press mention only")
+        else: add("e4", "Regulatory or tax proceedings", "for the committee",
+                  f"{f['value']} \u2014 " + ("concluded" if sev == "finding" else "under challenge or unresolved"), True)
+
+    for fid, label in [("5c","Litigation, individual or co-directors"),
                        ("e5","Default, NPA or insolvency"),("5d","Litigation, family members")]:
         f = get(fid)
         if not f: add(fid, label, "nothing found", "no match in the sources searched"); continue
         sev = (f.get("severity") or "mention").lower(); about = (f.get("about") or "subject").lower()
         own = about in ("subject", "company")
-        if sev == "finding" and own: add(fid, label, "disqualifying", f"{f['value']} — concluded, against the buyer")
-        elif sev == "finding": add(fid, label, "for the committee", f"{f['value']} — concluded, but against a {about}", True)
-        elif sev == "allegation": add(fid, label, "for the committee", f"{f['value']} — unproven, {about}", True)
-        else: add(fid, label, "noted", f"{f['value']} — press mention only, {about}")
+        if is_conviction(f) and not is_tax(f): sev = "finding"
+        if sev == "finding" and is_weak_source(f): sev = "allegation"
+        if is_foreign_affiliate(f):
+            add(fid, label, "noted", f"{f['value']} \u2014 a foreign affiliate, not the Indian entity or the buyer"); continue
+        if is_exonerated(f) and not is_conviction(f): sev = "mention"
+        elif is_exonerated(f) and is_conviction(f): sev = "allegation"
+        if is_minor(f, cfg) and not is_conviction(f):
+            add(fid, label, "noted", f"{f['value']} \u2014 too small to bear on a purchase at this level"); continue
+        if is_tax(f):
+            if sev == "mention": add(fid, label, "noted", f"{f['value']} \u2014 a tax matter, press mention only")
+            else: add(fid, label, "for the committee", f"{f['value']} \u2014 a tax matter, for the committee to weigh", True)
+        elif sev == "finding" and own: add(fid, label, "disqualifying", f"{f['value']} \u2014 concluded, against the buyer")
+        elif sev == "finding": add(fid, label, "for the committee", f"{f['value']} \u2014 concluded, but against a {about}", True)
+        elif sev == "allegation": add(fid, label, "for the committee", f"{f['value']} \u2014 unproven, {about}", True)
+        else: add(fid, label, "noted", f"{f['value']} \u2014 press mention only, {about}")
 
     add("anchorConflict", "Anchor-occupant business conflict", "untestable", "anchor list not supplied")
     return G
+
+# ---------------------------------------------------------------- breakdown (mirrors Code.gs)
+
+RAG_RANK = dict(grey=0, green=1, amber=2, red=3)
+def state_of(result):
+    if result in ("disqualifying", "far below"): return "red"
+    if result in ("nothing found", "pass", "exception applies", "noted"): return "green"
+    if result in ("not established", "untestable"): return "grey"
+    return "amber"
+def worst(states): return max(states, key=lambda s: RAG_RANK[s]) if states else "grey"
+def brief(text, words=10):
+    t = str(text or "").strip()
+    t = re.split(r"(?<=[.;])\s", t)[0]
+    t = re.split(r"\s+\u2014\s+", t)[0]
+    w = t.split()
+    if len(w) > words: t = " ".join(w[:words]) + "\u2026"
+    return re.sub(r"[,;:\s]+$", "", t)
+def breakdown(gates, ledger, anchor):
+    def g(fid): return next((x for x in gates if x["id"] == fid), dict(result="untestable", detail="not checked"))
+    def get(fid):
+        f = ledger.get(fid); return f if f and f.get("status") == "found" else None
+    dims = []
+    def push(name, subs):
+        dims.append(dict(name=name, subs=[dict(label=s["label"], state=s["state"], note=brief(s["note"])) for s in subs],
+                         state=worst([s["state"] for s in subs])))
+    idg = g("identity")
+    edu = (get("i7") or {}).get("value") or (anchor or {}).get("education") or ""
+    push("Identity", [dict(label="Name match", state=state_of(idg["result"]), note=idg["detail"]),
+                      dict(label="Education", state="green" if edu else "grey", note=edu or "not established")])
+    cap = g("capacity"); turn = get("6b"); nw = get("3a") or get("d2")
+    push("Financial capacity", [
+        dict(label="Turnover", state="green" if turn else "grey", note=turn["value"] if turn else "not established"),
+        dict(label="Net worth or liquidity", state="green" if nw else "grey", note=nw["value"] if nw else "not established"),
+        dict(label="Fit to the ticket asked for", state=state_of(cap["result"]), note=cap["detail"])])
+    push("Litigation and conduct", [
+        dict(label="Cases \u2014 client and co-directors", state=state_of(g("5c")["result"]), note=g("5c")["detail"]),
+        dict(label="Cases \u2014 immediate family", state=state_of(g("5d")["result"]), note=g("5d")["detail"]),
+        dict(label="Default or insolvency", state=state_of(g("e5")["result"]), note=g("e5")["detail"])])
+    push("Tax and regulatory", [dict(label="Tax and duty disputes", state=state_of(g("e4")["result"]), note=g("e4")["detail"])])
+    push("Sensitive profile", [
+        dict(label="Political exposure", state=state_of(g("g1")["result"]), note=g("g1")["detail"]),
+        dict(label="Developer connection", state=state_of(g("g2")["result"]), note=g("g2")["detail"]),
+        dict(label="Practising lawyer", state=state_of(g("g3")["result"]), note=g("g3")["detail"]),
+        dict(label="Journalist", state=state_of(g("g4")["result"]), note=g("g4")["detail"]),
+        dict(label="Public attention", state=state_of(g("g5")["result"]), note=g("g5")["detail"])])
+    push("Business conflict", [dict(label="Clash with an anchor occupier", state=state_of(g("anchorConflict")["result"]), note=g("anchorConflict")["detail"])])
+    return dims
+def trim_gaps(gaps):
+    out = []
+    for gtext in (gaps or [])[:4]:
+        t = str(gtext or "").strip()
+        t = re.split(r"(?<=[.;])\s", t)[0]
+        t = re.split(r"\s+\u2014\s+|,\s+(?:but|since|though|although|and the committee)\s", t)[0]
+        t = re.sub(r"[.,;:\s]+$", "", t)
+        if t: out.append(t)
+    return out
 
 def rate(G):
     by = {g["id"]: g for g in G}
@@ -232,9 +350,14 @@ def build_rows(sub, anchor, ledger, notes):
     def line(param, value, comment="", source="", guide="", stage="In meeting"):
         val = v(value); found = bool(val)
         R.append(dict(t="line", found=found, c=[param, val if found else NF, comment, (source if found else ""), guide, ("" if found else stage)]))
+    TIER = dict(primary="filing or order", reported="press report", unverified="unverified source")
+    def src_of(f):
+        if not f or not f.get("value"): return ""
+        t = TIER.get(str(f.get("tier","")).lower())
+        return "  \u00b7  ".join(x for x in [f.get("source"), t] if x)
     def fld(param, fid, guide="", stage="In meeting", comment=""):
         f = get(fid)
-        line(param, f["value"] if f else "", (f.get("note") if f else comment) or comment, f.get("source") if f else "", guide, stage)
+        line(param, f["value"] if f else "", (f.get("note") if f else comment) or comment, src_of(f), guide, stage)
     def either(param, typed, anchored, guide="", comment=""):
         val = v(typed) or v(anchored or "")
         line(param, val, comment, CPSRC if v(typed) else (a_src if val else ""), guide)
@@ -304,7 +427,7 @@ def build_rows(sub, anchor, ledger, notes):
     R.append(dict(t="sub", c=["Social Reputation"]))
     fld("5d. Any litigations or negative news about family members", "5d")
     line("5e. Closed network reference check", "", "Needs the CC / HPM feed — internal lookup", "", "Delayed CAM, conduct in existing society", "Customer Care")
-    hits = [get(g) for g in ("g1","g2","g3","g4") if get(g)]
+    hits = [get(g) for g in ("g1","g2","g3","g4","g5") if get(g)]
     line("5f. Sensitive Profile check", "; ".join(h["value"] for h in hits),
          "Community screen deliberately excluded — handled offline by the committee",
          hits[0]["source"] if hits else "", "Per policy 05.10.24 v3")
@@ -328,6 +451,10 @@ def build_rows(sub, anchor, ledger, notes):
     fld("7d. Corporate philanthropy", "i4")
     fld("7e. Public platform", "i5")
     fld("7f. Business lineage", "i6")
+    f7 = get("i7")
+    edu_val = (f7 or {}).get("value") or (anchor or {}).get("education") or ""
+    edu_src = src_of(f7) if f7 else (((anchor or {}).get("sources") or [""])[0])
+    line("7g. Education", edu_val, "", edu_src if edu_val else "", "Degrees and institutions, where a public source states them")
     remark(notes.get("standing"), "Standing and influence")
 
     R.append(dict(t="spacer", c=[]))
@@ -419,8 +546,8 @@ def cmd_evaluate(a):
     cfg = load_config(sheets)
     sub = json.loads(a.sub); anchor = json.loads(a.anchor) if a.anchor else None
     ledger = json.loads(a.ledger)
-    gates = evaluate_gates(ledger, anchor, sub.get("budget",""), cfg)
-    print(json.dumps(dict(gates=gates, verdict=rate(gates))))
+    gates = evaluate_gates(ledger, anchor, sub.get("budget",""), cfg, sub)
+    print(json.dumps(dict(gates=gates, verdict=rate(gates), breakdown=breakdown(gates, ledger, anchor))))
 
 def cmd_workbook(a):
     sheets, drive = gauth()
@@ -446,8 +573,10 @@ def cmd_writeback(a):
     a1 = lambda c: f"{LEADS}!{col(H[c])}{a.row}"
     write_cells(sheets, [
         (a1("Rating"), a.verdict), (a1("Identity Confidence"), a.confidence),
-        (a1("Profile Summary"), a.summary), (a1("Why This Rating"), a.reasoning),
-        (a1("Meeting Should Establish"), "\n".join("• " + g for g in gaps)),
+        (a1("Profile Summary"), a.summary),
+        # the column keeps its name; it now carries the breakdown JSON
+        (a1("Why This Rating"), a.breakdown if a.breakdown else (a.reasoning or "")),
+        (a1("Meeting Should Establish"), "\n".join("• " + g for g in trim_gaps(gaps))),
         (a1("Escalations"), a.escalations or ""), (a1("Evidence Report"), a.evidence_url or ""),
         (a1("Interactions"), json.dumps(inter)), (a1("Status"), ST["PENDING"]),
         (a1("Last Run"), now_iso()),
@@ -476,7 +605,8 @@ def main():
     c = sub.add_parser("writeback")
     c.add_argument("--row", type=int, required=True); c.add_argument("--verdict", required=True)
     c.add_argument("--confidence", default=""); c.add_argument("--summary", required=True)
-    c.add_argument("--reasoning", required=True); c.add_argument("--gaps", default="[]")
+    c.add_argument("--reasoning", default=""); c.add_argument("--breakdown", default="")
+    c.add_argument("--gaps", default="[]")
     c.add_argument("--escalations", default=""); c.add_argument("--evidence_url", default="")
     c.set_defaults(fn=cmd_writeback)
     c = sub.add_parser("fail"); c.add_argument("--row", type=int, required=True)
