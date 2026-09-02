@@ -53,14 +53,15 @@ STALE_MINUTES = 30
 ST = dict(QUEUED="QUEUED", IDENTITY_CHECK="IDENTITY_CHECK", CONFIRMED="CONFIRMED",
           ENRICHING="ENRICHING", PENDING="PENDING_APPROVAL", FAILED="FAILED")
 
-CONFIG_DEFAULTS = dict(identityMin=0.60, baseTicketCr=200, baseTurnoverFloorCr=500,
-                       baseNetWorthFloorCr=200, capacityRedBelowRatio=0.5,
-                       developerCarveOutCr=500, materialityCr=1)
+CONFIG_DEFAULTS = dict(identityMin=0.60, baseTicketCr=60, baseTurnoverFloorCr=150,
+                       baseNetWorthFloorCr=60, capacityRedBelowRatio=0.75,
+                       developerCarveOutCr=500, materialityCr=1,
+                       taxMaterialityCr=25, taxMaterialityPctOfTurnover=2)
 # (label, ticket Cr, matching floor-area band) — area at Rs 20,000/sq ft
-BANDS = [("\u20B9200 \u2013 300 Cr", 200, "1,00,000 \u2013 1,50,000 sq ft"),
-         ("\u20B9300 \u2013 500 Cr", 300, "1,50,000 \u2013 2,50,000 sq ft"),
-         ("\u20B9500 \u2013 750 Cr", 500, "2,50,000 \u2013 3,75,000 sq ft"),
-         ("Above \u20B9750 Cr",       750, "Above 3,75,000 sq ft")]
+BANDS = [("\u20B960 \u2013 100 Cr",   60, "12,000 \u2013 20,000 sq ft"),
+         ("\u20B9100 \u2013 200 Cr", 100, "20,000 \u2013 40,000 sq ft"),
+         ("\u20B9200 \u2013 350 Cr", 200, "40,000 \u2013 70,000 sq ft"),
+         ("Above \u20B9350 Cr",      350, "Above 70,000 sq ft")]
 
 TAX_MATTER = re.compile(r"\b(gst|goods and services tax|income[- ]tax|tax demand|tax notice|show[- ]cause|assessment order|adjudication order|input tax credit|customs|excise|vat|service tax|tds|transfer pricing)\b", re.I)
 CONVICTION = re.compile(r"\b(convicted|conviction|found guilty|pleaded guilty|sentenced|rigorous imprisonment|criminal breach of trust|debarred|disqualified as a director|barred from (?:trading|the securities market|holding))\b", re.I)
@@ -68,6 +69,13 @@ EXONERATION = re.compile(r"\b(acquitted|acquittal|exonerated|discharged|quashed|
 CONSUMER = re.compile(r"\b(consumer (?:court|forum|commission|dispute|redressal)|district commission|state commission|ncdrc|deficiency in service|small claims)\b", re.I)
 
 def _txt(f): return f"{(f or {}).get('value','')} {(f or {}).get('note','')}"
+BODY_ROLE = re.compile(r"\b(president|chairman|chairperson|vice[- ]president|office[- ]bearer|council member|committee member|board member|past president)\b", re.I)
+BODY_NAME = re.compile(r"\b(assocham|ficci|\bcii\b|phd chamber|phdcci|chamber of commerce|industry association|confederation of indian industry|nasscom|crisil|sector association)\b", re.I)
+MEDIA_WORDS = re.compile(r"\b(podcast|television|tv show|programme|program|shark|anchor|host|column|channel)\b", re.I)
+def is_body_role(f):
+    if not f: return False
+    t = _txt(f)
+    return bool(BODY_NAME.search(t)) or (bool(BODY_ROLE.search(t)) and not MEDIA_WORDS.search(t))
 def is_tax(f): return bool(f) and bool(TAX_MATTER.search(_txt(f)))
 def is_conviction(f): return bool(f) and bool(CONVICTION.search(_txt(f)))
 def is_exonerated(f): return bool(f) and bool(EXONERATION.search(_txt(f)))
@@ -235,7 +243,7 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
         add("capacity", "Capacity against ticket", "short", f"{fmt_cr(cr if cr is not None else wcr)} \u00b7 {need_txt}")
 
     for fid, label in [("g1","Politically exposed person"),("g2","Real estate developer interest"),
-                       ("g3","Practising lawyer"),("g4","Journalist"),("g5","Public visibility")]:
+                       ("g3","Practising lawyer"),("g4","Journalist"),("g5","Mass-market fame")]:
         f = get(fid)
         if not f: add(fid, label, "nothing found", "no match in the sources searched"); continue
         if fid == "g2" and cr is not None and cr >= cfg["developerCarveOutCr"]:
@@ -247,7 +255,12 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
     if not f: add("e4", "Regulatory or tax proceedings", "nothing found", "no match in the sources searched")
     else:
         sev = (f.get("severity") or "mention").lower()
-        if sev == "mention": add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 press mention only")
+        amt = amount_cr(_txt(f))
+        tn = cr_from(get("6b")["value"]) if get("6b") else None
+        bar = max(cfg["taxMaterialityCr"], (tn * cfg["taxMaterialityPctOfTurnover"] / 100) if tn is not None else 0)
+        if amt is not None and amt < bar:
+            add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 small against the size of the business")
+        elif sev == "mention": add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 press mention only")
         else: add("e4", "Regulatory or tax proceedings", "for the committee",
                   f"{f['value']} \u2014 " + ("concluded" if sev == "finding" else "under challenge or unresolved"), True)
 
@@ -273,6 +286,11 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
         elif sev == "allegation": add(fid, label, "for the committee", f"{f['value']} \u2014 unproven, {about}", True)
         else: add(fid, label, "noted", f"{f['value']} \u2014 press mention only, {about}")
 
+    f6 = get("g6")
+    if not f6: add("g6", "Business media presence", "nothing found", "no match in the sources searched")
+    elif is_body_role(f6): add("g6", "Business media presence", "nothing found", "an industry body role, recorded under standing")
+    else: add("g6", "Business media presence", "for information", f"{f6['value']} \u2014 noted, does not affect the rating")
+
     anchors = cfg.get("anchors") or []
     if anchors:
         ind = str((sub or {}).get("industry") or (anchor or {}).get("industry") or "").lower()
@@ -292,7 +310,7 @@ def state_of(result):
     if result in ("disqualifying", "far below"): return "red"
     if result in ("nothing found", "pass", "exception applies", "noted"): return "green"
     if result in ("not established", "untestable"): return "grey"
-    return "amber"
+    return "amber"  # includes 'for information': shown, never decides
 def worst(states): return max(states, key=lambda s: RAG_RANK[s]) if states else "grey"
 def brief(text, words=10):
     t = str(text or "").strip()
@@ -331,7 +349,8 @@ def breakdown(gates, ledger, anchor):
         dict(label="Education", state="green" if edu else "grey", note=edu or "not established",
              src=str(edu_f.get("source") or "") if edu_f else (anchor_src if edu else "")),
         row("Political exposure", g("g1"), ["g1"]), row("Practising lawyer", g("g3"), ["g3"]),
-        row("Journalist", g("g4"), ["g4"]), row("Public attention", g("g5"), ["g5"]),
+        row("Journalist", g("g4"), ["g4"]), row("Mass-market fame", g("g5"), ["g5"]),
+        row("Business media presence", g("g6"), ["g6"]),
         row("Cases \u2014 immediate family", g("5d"), ["5d"])])
     push("Financial Capacity", [
         dict(label="Turnover", state="green" if turn else "grey", note=turn["value"] if turn else "not established", src=str(turn.get("source") or "") if turn else ""),
@@ -455,7 +474,7 @@ def build_rows(sub, anchor, ledger, notes):
     R.append(dict(t="sub", c=["Social Reputation"]))
     fld("5d. Any litigations or negative news about family members", "5d")
     line("5e. Closed network reference check", "", "Needs the CC / HPM feed — internal lookup", "", "Delayed CAM, conduct in existing society", "Customer Care")
-    hits = [get(g) for g in ("g1","g2","g3","g4","g5") if get(g)]
+    hits = [get(g) for g in ("g1","g2","g3","g4","g5","g6") if get(g)]
     line("5f. Sensitive Profile check", "; ".join(h["value"] for h in hits),
          "Community screen deliberately excluded — handled offline by the committee",
          hits[0]["source"] if hits else "", "Per policy 05.10.24 v3")
