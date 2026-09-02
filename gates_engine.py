@@ -50,7 +50,8 @@ FOLDER_ID = os.environ.get("GCR_DRIVE_FOLDER", "")
 LEADS     = "Leads"
 STALE_MINUTES = 30
 
-ST = dict(QUEUED="QUEUED", ENRICHING="ENRICHING", PENDING="PENDING_APPROVAL", FAILED="FAILED")
+ST = dict(QUEUED="QUEUED", IDENTITY_CHECK="IDENTITY_CHECK", CONFIRMED="CONFIRMED",
+          ENRICHING="ENRICHING", PENDING="PENDING_APPROVAL", FAILED="FAILED")
 
 CONFIG_DEFAULTS = dict(identityMin=0.60, baseTicketCr=200, baseTurnoverFloorCr=500,
                        baseNetWorthFloorCr=200, capacityRedBelowRatio=0.5,
@@ -384,7 +385,7 @@ def build_rows(sub, anchor, ledger, notes):
     band("Client Requirement & Source Details")
     line("Budget", sub.get("budget"), "Units start at ₹200 Cr", CPSRC)
     line("Configuration interested in", " · ".join(x for x in [v(sub.get("area")), v(sub.get("purpose"))] if x), "", CPSRC)
-    line("Source", "Channel Partner", "", "Intake form")
+    line("Source", sub.get("leadSource") or "Channel Partner", "", "Intake form")
     line("Source Details ( CP Company name)",
          " · ".join(x for x in [v(sub.get("cpFirm")), v(sub.get("cpSpoc")), f"Reap {sub['reapId']}" if v(sub.get("reapId")) else ""] if x),
          "", CPSRC, "", "Before walkin")
@@ -523,16 +524,49 @@ def cmd_read_queue(a):
                 stale = age > STALE_MINUTES
             except Exception:
                 stale = True
-        if status == ST["QUEUED"] or (status == ST["ENRICHING"] and stale):
+        if status in (ST["QUEUED"], ST["CONFIRMED"]) or (status == ST["ENRICHING"] and stale):
+            try: anchor_obj = json.loads(g("Identity Anchor") or "null")
+            except Exception: anchor_obj = None
+            confirmed = bool(anchor_obj and anchor_obj.get("confirmed"))
+            phase = "research" if (status == ST["CONFIRMED"] or confirmed) else "identity"
             sub = dict(clientName=g("Client Name"), company=g("Company"), role=g("Role"),
                        industry=g("Industry"), officeCity=g("Based At"), website=g("Website"),
                        linkedin=g("LinkedIn"), budget=g("Budget"), area=g("Floor Area"),
                        purpose=g("Intended Use"), currentOffice=g("Office Today"),
-                       existing=g("Existing Lodha Buyer"), notes=g("Notes"),
+                       leadSource=g("Lead Source"), existing=("Yes" if g("Lead Source") == "Existing Lodha Customer" else ""), notes=g("Notes"),
                        cpFirm=g("CP Firm"), cpSpoc=g("CP SPOC"), reapId=g("Reap ID"),
                        smName=g("SM Name"), smEmail=g("Owner Email"), reference=g("Reference"))
-            out.append(dict(row=i, reference=sub["reference"], sub=sub, was_stale=stale))
+            out.append(dict(row=i, reference=sub["reference"], sub=sub, was_stale=stale,
+                            phase=phase, anchor=anchor_obj if confirmed else None))
     print(json.dumps(dict(rows=out)))
+
+def cmd_identity(a):
+    """End of phase one: store the preliminary match and park the lead at
+    IDENTITY_CHECK for the sourcing manager to confirm. Nothing else runs on
+    this lead until they do."""
+    sheets, _ = gauth()
+    _, _, H = leads_header(sheets)
+    anchor = json.loads(a.anchor) if a.anchor else dict(resolved=False, confidence=0, note="identity step returned nothing")
+    anchor["checkedAt"] = now_iso()
+    try:
+        vals = read_all(sheets, LEADS)[a.row - 1]
+        inter = json.loads(vals[H["Interactions"]]) if H.get("Interactions") is not None and H["Interactions"] < len(vals) and vals[H["Interactions"]] else []
+        name = vals[H["Client Name"]] if H["Client Name"] < len(vals) else ""
+    except Exception:
+        inter, name = [], ""
+    cfg = load_config(sheets)
+    matched = bool(anchor.get("resolved")) and float(anchor.get("confidence") or 0) >= cfg["identityMin"]
+    inter.append(dict(t=now_iso(), who="System", text=(
+        f"Client identified: {anchor.get('full_name') or name}" + (f" \u2014 {anchor['company']}" if anchor.get("company") else "") + ". Awaiting confirmation."
+        if matched else "Client not identified with confidence. Awaiting confirmation or amended details.")))
+    a1 = lambda c: f"{LEADS}!{col(H[c])}{a.row}"
+    write_cells(sheets, [
+        (a1("Identity Anchor"), json.dumps(anchor)),
+        (a1("Identity Confidence"), str(anchor.get("confidence")) if anchor.get("confidence") is not None else "not resolved"),
+        (a1("Interactions"), json.dumps(inter)),
+        (a1("Status"), ST["IDENTITY_CHECK"]), (a1("Last Run"), now_iso()),
+    ])
+    print(json.dumps(dict(ok=True, parked=True)))
 
 def cmd_claim(a):
     sheets, _ = gauth()
@@ -595,6 +629,8 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("read_queue").set_defaults(fn=cmd_read_queue)
     c = sub.add_parser("claim"); c.add_argument("--row", type=int, required=True); c.set_defaults(fn=cmd_claim)
+    c = sub.add_parser("identity"); c.add_argument("--row", type=int, required=True)
+    c.add_argument("--anchor", default=""); c.set_defaults(fn=cmd_identity)
     c = sub.add_parser("evaluate")
     c.add_argument("--sub", required=True); c.add_argument("--anchor", default="")
     c.add_argument("--ledger", required=True); c.set_defaults(fn=cmd_evaluate)
