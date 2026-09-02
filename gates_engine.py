@@ -305,30 +305,39 @@ def breakdown(gates, ledger, anchor):
     def g(fid): return next((x for x in gates if x["id"] == fid), None)
     def get(fid):
         f = ledger.get(fid); return f if f and f.get("status") == "found" else None
-    def row(label, gate): return dict(label=label, state=state_of(gate["result"]), note=gate["detail"]) if gate else None
+    def src_of(ids):
+        for i in ids:
+            f = get(i)
+            if f and f.get("source"): return str(f["source"])
+        return ""
+    anchor_src = str(((anchor or {}).get("sources") or [""])[0] or "")
+    def row(label, gate, ids=()):
+        return dict(label=label, state=state_of(gate["result"]), note=gate["detail"], src=src_of(ids)) if gate else None
     dims = []
     def push(name, subs):
         subs = [s for s in subs if s]
-        dims.append(dict(name=name, subs=[dict(label=s["label"], state=s["state"], note=brief(s["note"])) for s in subs],
+        dims.append(dict(name=name, subs=[dict(label=s["label"], state=s["state"], note=str(s.get("note") or ""), src=s.get("src") or "") for s in subs],
                          state=worst([s["state"] for s in subs])))
     idg = g("identity") or dict(result="untestable", detail="not checked")
-    edu = (get("i7") or {}).get("value") or (anchor or {}).get("education") or ""
+    edu_f = get("i7")
+    edu = (edu_f or {}).get("value") or (anchor or {}).get("education") or ""
     cap = g("capacity") or dict(result="untestable", detail="not checked")
     turn = get("6b"); nw = get("3a") or get("d2")
     push("Business Reputation", [
-        row("Cases \u2014 client and co-directors", g("5c")), row("Tax and duty disputes", g("e4")),
-        row("Developer connection", g("g2")), row("Conflict with an existing occupier", g("anchorConflict"))])
+        row("Cases \u2014 client and co-directors", g("5c"), ["5c"]), row("Tax and duty disputes", g("e4"), ["e4"]),
+        row("Developer connection", g("g2"), ["g2"]), row("Conflict with an existing occupier", g("anchorConflict"), ["6g"])])
     push("Personal Image", [
-        dict(label="Identity confirmed", state=state_of(idg["result"]), note=idg["detail"]),
-        dict(label="Education", state="green" if edu else "grey", note=edu or "not established"),
-        row("Political exposure", g("g1")), row("Practising lawyer", g("g3")),
-        row("Journalist", g("g4")), row("Public attention", g("g5")),
-        row("Cases \u2014 immediate family", g("5d"))])
+        dict(label="Identity confirmed", state=state_of(idg["result"]), note=idg["detail"], src=anchor_src),
+        dict(label="Education", state="green" if edu else "grey", note=edu or "not established",
+             src=str(edu_f.get("source") or "") if edu_f else (anchor_src if edu else "")),
+        row("Political exposure", g("g1"), ["g1"]), row("Practising lawyer", g("g3"), ["g3"]),
+        row("Journalist", g("g4"), ["g4"]), row("Public attention", g("g5"), ["g5"]),
+        row("Cases \u2014 immediate family", g("5d"), ["5d"])])
     push("Financial Capacity", [
-        dict(label="Turnover", state="green" if turn else "grey", note=turn["value"] if turn else "not established"),
-        dict(label="Net worth or liquidity", state="green" if nw else "grey", note=nw["value"] if nw else "not established"),
-        dict(label="Fit to the ticket asked for", state=state_of(cap["result"]), note=cap["detail"]),
-        row("Default or insolvency", g("e5"))])
+        dict(label="Turnover", state="green" if turn else "grey", note=turn["value"] if turn else "not established", src=str(turn.get("source") or "") if turn else ""),
+        dict(label="Net worth or liquidity", state="green" if nw else "grey", note=nw["value"] if nw else "not established", src=str(nw.get("source") or "") if nw else ""),
+        dict(label="Fit to the ticket asked for", state=state_of(cap["result"]), note=cap["detail"], src=src_of(["6b","3a","d2"])),
+        row("Default or insolvency", g("e5"), ["e5"])])
     return dims
 def trim_gaps(gaps):
     out = []
