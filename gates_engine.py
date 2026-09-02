@@ -151,6 +151,16 @@ def write_cells(sheets, updates):
     body = {"valueInputOption": "RAW", "data": [{"range": r, "values": [[v]]} for r, v in updates]}
     sheets.spreadsheets().values().batchUpdate(spreadsheetId=SHEET_ID, body=body).execute()
 
+def load_anchors(sheets):
+    out = []
+    try:
+        for row in read_all(sheets, "Anchors")[1:]:
+            if len(row) >= 2 and row[0].strip() and row[1].strip():
+                out.append(dict(occupier=row[0].strip(), line=row[1].strip()))
+    except Exception:
+        pass
+    return out
+
 def load_config(sheets):
     cfg = dict(CONFIG_DEFAULTS)
     try:
@@ -263,7 +273,16 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
         elif sev == "allegation": add(fid, label, "for the committee", f"{f['value']} \u2014 unproven, {about}", True)
         else: add(fid, label, "noted", f"{f['value']} \u2014 press mention only, {about}")
 
-    add("anchorConflict", "Anchor-occupant business conflict", "untestable", "anchor list not supplied")
+    anchors = cfg.get("anchors") or []
+    if anchors:
+        ind = str((sub or {}).get("industry") or (anchor or {}).get("industry") or "").lower()
+        f6g = get("6g")
+        if not ind and f6g: ind = str(f6g["value"]).lower()
+        hit = next((a for a in anchors if ind and (a["line"].lower() in ind or ind in a["line"].lower())), None)
+        if hit: add("anchorConflict", "Conflict with an existing occupier", "for the committee",
+                    f"same line of business as {hit['occupier']} ({hit['line']})", True)
+        elif ind: add("anchorConflict", "Conflict with an existing occupier", "nothing found", "no overlap with any anchor occupier")
+        else: add("anchorConflict", "Conflict with an existing occupier", "not established", "client\u2019s line of business not established")
     return G
 
 # ---------------------------------------------------------------- breakdown (mirrors Code.gs)
@@ -283,34 +302,33 @@ def brief(text, words=10):
     if len(w) > words: t = " ".join(w[:words]) + "\u2026"
     return re.sub(r"[,;:\s]+$", "", t)
 def breakdown(gates, ledger, anchor):
-    def g(fid): return next((x for x in gates if x["id"] == fid), dict(result="untestable", detail="not checked"))
+    def g(fid): return next((x for x in gates if x["id"] == fid), None)
     def get(fid):
         f = ledger.get(fid); return f if f and f.get("status") == "found" else None
+    def row(label, gate): return dict(label=label, state=state_of(gate["result"]), note=gate["detail"]) if gate else None
     dims = []
     def push(name, subs):
+        subs = [s for s in subs if s]
         dims.append(dict(name=name, subs=[dict(label=s["label"], state=s["state"], note=brief(s["note"])) for s in subs],
                          state=worst([s["state"] for s in subs])))
-    idg = g("identity")
+    idg = g("identity") or dict(result="untestable", detail="not checked")
     edu = (get("i7") or {}).get("value") or (anchor or {}).get("education") or ""
-    push("Identity", [dict(label="Name match", state=state_of(idg["result"]), note=idg["detail"]),
-                      dict(label="Education", state="green" if edu else "grey", note=edu or "not established")])
-    cap = g("capacity"); turn = get("6b"); nw = get("3a") or get("d2")
-    push("Financial capacity", [
+    cap = g("capacity") or dict(result="untestable", detail="not checked")
+    turn = get("6b"); nw = get("3a") or get("d2")
+    push("Business Reputation", [
+        row("Cases \u2014 client and co-directors", g("5c")), row("Tax and duty disputes", g("e4")),
+        row("Developer connection", g("g2")), row("Conflict with an existing occupier", g("anchorConflict"))])
+    push("Personal Image", [
+        dict(label="Identity confirmed", state=state_of(idg["result"]), note=idg["detail"]),
+        dict(label="Education", state="green" if edu else "grey", note=edu or "not established"),
+        row("Political exposure", g("g1")), row("Practising lawyer", g("g3")),
+        row("Journalist", g("g4")), row("Public attention", g("g5")),
+        row("Cases \u2014 immediate family", g("5d"))])
+    push("Financial Capacity", [
         dict(label="Turnover", state="green" if turn else "grey", note=turn["value"] if turn else "not established"),
         dict(label="Net worth or liquidity", state="green" if nw else "grey", note=nw["value"] if nw else "not established"),
-        dict(label="Fit to the ticket asked for", state=state_of(cap["result"]), note=cap["detail"])])
-    push("Litigation and conduct", [
-        dict(label="Cases \u2014 client and co-directors", state=state_of(g("5c")["result"]), note=g("5c")["detail"]),
-        dict(label="Cases \u2014 immediate family", state=state_of(g("5d")["result"]), note=g("5d")["detail"]),
-        dict(label="Default or insolvency", state=state_of(g("e5")["result"]), note=g("e5")["detail"])])
-    push("Tax and regulatory", [dict(label="Tax and duty disputes", state=state_of(g("e4")["result"]), note=g("e4")["detail"])])
-    push("Sensitive profile", [
-        dict(label="Political exposure", state=state_of(g("g1")["result"]), note=g("g1")["detail"]),
-        dict(label="Developer connection", state=state_of(g("g2")["result"]), note=g("g2")["detail"]),
-        dict(label="Practising lawyer", state=state_of(g("g3")["result"]), note=g("g3")["detail"]),
-        dict(label="Journalist", state=state_of(g("g4")["result"]), note=g("g4")["detail"]),
-        dict(label="Public attention", state=state_of(g("g5")["result"]), note=g("g5")["detail"])])
-    push("Business conflict", [dict(label="Clash with an anchor occupier", state=state_of(g("anchorConflict")["result"]), note=g("anchorConflict")["detail"])])
+        dict(label="Fit to the ticket asked for", state=state_of(cap["result"]), note=cap["detail"]),
+        row("Default or insolvency", g("e5"))])
     return dims
 def trim_gaps(gaps):
     out = []
@@ -577,7 +595,7 @@ def cmd_claim(a):
 
 def cmd_evaluate(a):
     sheets, _ = gauth()
-    cfg = load_config(sheets)
+    cfg = load_config(sheets); cfg["anchors"] = load_anchors(sheets)
     sub = json.loads(a.sub); anchor = json.loads(a.anchor) if a.anchor else None
     ledger = json.loads(a.ledger)
     gates = evaluate_gates(ledger, anchor, sub.get("budget",""), cfg, sub)
