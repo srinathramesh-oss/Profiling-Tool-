@@ -331,10 +331,15 @@ def breakdown(gates, ledger, anchor):
     anchor_src = str(((anchor or {}).get("sources") or [""])[0] or "")
     def row(label, gate, ids=()):
         return dict(label=label, state=state_of(gate["result"]), note=gate["detail"], src=src_of(ids)) if gate else None
+    SECTION_SOURCES = {
+        "Business Reputation": "Indian Kanoon and the eCourts portal for judgments; NCLT, NCLAT, IBBI and SEBI for orders; LiveLaw and Bar & Bench for reported cases; the business press.",
+        "Personal Image": "Sworn election affidavits via MyNeta and ADR; Lok Sabha and Rajya Sabha member pages; Bar Council rolls; the company's own leadership biography; verified social accounts.",
+        "Financial Capacity": "BSE and NSE filings, the company's annual report and investor pages; MCA master data via Zauba Corp, Tofler and The Company Check; shareholding patterns filed with the exchanges.",
+    }
     dims = []
     def push(name, subs):
         subs = [s for s in subs if s]
-        dims.append(dict(name=name, subs=[dict(label=s["label"], state=s["state"], note=str(s.get("note") or ""), src=s.get("src") or "") for s in subs],
+        dims.append(dict(name=name, sources=SECTION_SOURCES.get(name, ""), subs=[dict(label=s["label"], state=s["state"], note=str(s.get("note") or ""), src=s.get("src") or "") for s in subs],
                          state=worst([s["state"] for s in subs])))
     idg = g("identity") or dict(result="untestable", detail="not checked")
     edu_f = get("i7")
@@ -344,12 +349,21 @@ def breakdown(gates, ledger, anchor):
     push("Business Reputation", [
         row("Cases \u2014 client and co-directors", g("5c"), ["5c"]), row("Tax and duty disputes", g("e4"), ["e4"]),
         row("Developer connection", g("g2"), ["g2"]), row("Conflict with an existing occupier", g("anchorConflict"), ["6g"])])
+    # One question in practice: does the policy ask the committee to look at
+    # this profile before a meeting? Identity is confirmed by a human before
+    # any of this runs, so it gets no row.
+    restricted = [x for x in (g("g1"), g("g3"), g("g4"), g("g5")) if x]
+    flagged = [x for x in restricted if x["escalate"] or x["result"] == "disqualifying"]
+    restricted_row = dict(
+        label="Restricted profession or public profile",
+        state=worst([state_of(x["result"]) for x in flagged]) if flagged else "green",
+        note="; ".join(f"{x['label']}: {x['detail']}" for x in flagged) if flagged
+             else "none of the restricted categories apply",
+        src=src_of(["g1","g3","g4","g5"]))
     push("Personal Image", [
-        dict(label="Identity confirmed", state=state_of(idg["result"]), note=idg["detail"], src=anchor_src),
         dict(label="Education", state="green" if edu else "grey", note=edu or "not established",
              src=str(edu_f.get("source") or "") if edu_f else (anchor_src if edu else "")),
-        row("Political exposure", g("g1"), ["g1"]), row("Practising lawyer", g("g3"), ["g3"]),
-        row("Journalist", g("g4"), ["g4"]), row("Mass-market fame", g("g5"), ["g5"]),
+        restricted_row,
         row("Business media presence", g("g6"), ["g6"]),
         row("Cases \u2014 immediate family", g("5d"), ["5d"])])
     push("Financial Capacity", [
