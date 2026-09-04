@@ -75,6 +75,23 @@ BUSINESS_SHOW = re.compile(r"\b(shark tank|startup|start-up|entrepreneur|investo
 ONE_OFF_MEDIA = re.compile(r"\b(guest|interview(?:ed|ee)?|appeared on|panel(?:list)?|quoted|spoke (?:to|at)|featured in|episode)\b", re.I)
 RECURRING_MEDIA = re.compile(r"\b(host(?:s|ed|ing)?|judge|judging|presenter|presents|anchor|column(?:ist)?|his own (?:show|podcast)|regular(?:ly)?|series)\b", re.I)
 REGULATORY_MATTER = re.compile(r"\b(recall(?:ed|s)?|product safety|food safety|fssai|adulterat\w*|contaminat\w*|ethylene oxide|pesticide residue|licence (?:suspend\w*|cancel\w*)|license (?:suspend\w*|cancel\w*)|ban(?:ned)? (?:on )?(?:the )?sale|import alert|withdrawal from shelves|standards authority|regulator(?:y)? (?:action|notice|order|investigation))\b", re.I)
+# What makes a tax matter worth a committee's time. Not the existence of a
+# dispute — every large company has writs running against demands, and being
+# the petitioner is the ordinary posture, not an accusation.
+TAX_SERIOUS = re.compile(r"\b(evasion|evading|concealment|concealed|fraudulent|fraud|bogus|fake invoic\w*|wilful|prosecut\w*|arrest\w*|summons|search and seiz\w*|penalty upheld|criminal)\b", re.I)
+def is_serious_tax(f): return bool(f) and bool(TAX_SERIOUS.search(_txt(f)))
+
+# A school, a university, a hospital, a trust, a government body: nobody owns
+# them, so "no turnover found" is not a gap in the research — the question
+# does not apply and the person's means must come from evidence about them.
+NON_COMMERCIAL = re.compile(r"\b(school|university|college|institute of|academy|vidyalaya|hospital|trust|foundation|society|ngo|charit\w*|municipal|corporation of|government|ministry|authority|board of|council|association)\b", re.I)
+def is_non_commercial(sub, ledger):
+    def val(i):
+        f = ledger.get(i)
+        return f["value"] if f and f.get("status") == "found" else ""
+    hay = " ".join([str((sub or {}).get("company") or ""), str((sub or {}).get("industry") or ""), str(val("6a"))])
+    return bool(NON_COMMERCIAL.search(hay)) and not INVESTMENT_VEHICLE.search(str((sub or {}).get("company") or ""))
+
 INVESTMENT_VEHICLE = re.compile(r"\b(capital|investments?|holdings?|ventures?|securities|portfolio management|family office|asset management|fund|advisors|advisers|equity research|broking|wealth)\b", re.I)
 NOT_A_VALUE = re.compile(r"^(not[_\s-]?found|not[_\s-]?available|not[_\s-]?established|none|nil|n/?a|unknown|unavailable|no[_\s-]?data|-+|\u2014|\d+[.)]?|[.,;:]+)$", re.I)
 
@@ -279,15 +296,23 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
             best = (lbl, tk)
     routes = []
     if cr is not None and cr >= need_t: routes.append(f"turnover {fmt_cr(cr)}")
+    needs = []
+    if cr is not None and cr >= need_t: needs.append(f"{fmt_cr(need_t)} turnover")
     if wcr is not None and wcr >= need_w:
         routes.append(ev["note"] if (ev and wcr == ev["cr"]) else f"net worth {fmt_cr(wcr)}")
-    need_txt = f"needs {fmt_cr(need_t)}"
+        needs.append(f"{fmt_cr(need_w)} net worth")
+    # name the bar that was actually cleared
+    need_txt = "needs " + (" or ".join(needs) if needs else f"{fmt_cr(need_t)} turnover")
 
     if routes:
         add("capacity", "Capacity against ticket", "pass", ", ".join(routes) + " \u00b7 " + need_txt)
     elif best:
         add("capacity", "Capacity against ticket", "qualifies lower",
             f"supports {best[0]}, not the {fmt_cr(ticket)} asked for", True)
+    elif is_non_commercial(sub, ledger) and wcr is None:
+        add("capacity", "Capacity against ticket", "not established",
+            "no owner-operated business \u2014 the institution\u2019s finances are not his, "
+            "so means must be established directly")
     elif cr is None and wcr is None:
         add("capacity", "Capacity against ticket", "not established",
             "an investment vehicle \u2014 its revenue says nothing about the owner\u2019s means"
@@ -327,7 +352,11 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
         bar = max(cfg["taxMaterialityCr"], (tn * cfg["taxMaterialityPctOfTurnover"] / 100) if tn is not None else 0)
         if f is None:
             pass
-        elif amt is not None and amt < bar:
+        elif not is_serious_tax(f) and amt is None:
+            # a dispute with no sum attached cannot be weighed, so it is ordinary
+            add("e4", "Regulatory or tax proceedings", "noted",
+                f"{f['value']} \u2014 no sum stated, treated as an ordinary dispute")
+        elif not is_serious_tax(f) and amt is not None and amt < bar:
             add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 small against the size of the business")
         elif sev == "mention": add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 press mention only")
         else: add("e4", "Regulatory or tax proceedings", "for the committee",
