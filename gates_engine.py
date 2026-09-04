@@ -131,14 +131,18 @@ def is_foreign_affiliate(f):
     return str(f.get("about","subject")).lower() != "subject"
 def amount_cr(text):
     t = str(text or "").replace(",", "")
-    m = re.search(r"(?:rs\.?|inr|\u20B9)\s*([\d.]+)\s*(lakh\s*crore|crore|cr\b|lakhs?)?", t, re.I)
+    m = re.search(r"(?:rs\.?|inr|rupees|\u20B9)?\s*([\d.]+)\s*(lakh\s*crore|crores?|cr\b|karod|karor|kror|arabs?|lakhs?|lacs?|millions?|mn\b|billions?|bn\b|k\b|thousand)?", t, re.I)
     if not m: return None
     try: n = float(m.group(1))
     except ValueError: return None
     unit = (m.group(2) or "").lower()
     if unit.startswith("lakh crore"): return n * 100000
-    if unit.startswith("crore") or unit == "cr": return n
-    if unit.startswith("lakh"): return n / 100
+    if unit.startswith("crore") or unit.startswith("cr") or unit in ("karod","karor","kror"): return n
+    if unit.startswith("arab"): return n * 100
+    if unit.startswith("lakh") or unit.startswith("lac"): return n / 100
+    if unit.startswith("billion") or unit == "bn": return n * 100
+    if unit.startswith("million") or unit in ("mn","mm"): return n / 10
+    if unit in ("k","thousand"): return n / 10000
     return n / 10000000
 def is_minor(f, cfg):
     if not f: return False
