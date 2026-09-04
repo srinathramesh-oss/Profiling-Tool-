@@ -57,6 +57,9 @@ CONFIG_DEFAULTS = dict(identityMin=0.60, baseTicketCr=60, baseTurnoverFloorCr=15
                        baseNetWorthFloorCr=60, capacityRedBelowRatio=0.75,
                        developerCarveOutCr=500, materialityCr=1,
                        taxMaterialityCr=25, taxMaterialityPctOfTurnover=2)
+# Red only where the business is plainly too small and nothing else points
+# the other way; the floor is a proxy resting on an assumed margin.
+CONFIG_DEFAULTS["capacityRedBelowRatio"] = 0.4
 # (label, ticket Cr, matching floor-area band) — area at Rs 20,000/sq ft
 BANDS = [("\u20B960 \u2013 100 Cr",   60, "12,000 \u2013 20,000 sq ft"),
          ("\u20B9100 \u2013 200 Cr", 100, "20,000 \u2013 40,000 sq ft"),
@@ -65,7 +68,50 @@ BANDS = [("\u20B960 \u2013 100 Cr",   60, "12,000 \u2013 20,000 sq ft"),
 
 TAX_MATTER = re.compile(r"\b(gst|goods and services tax|income[- ]tax|tax demand|tax notice|show[- ]cause|assessment order|adjudication order|input tax credit|customs|excise|vat|service tax|tds|transfer pricing)\b", re.I)
 CONVICTION = re.compile(r"\b(convicted|conviction|found guilty|pleaded guilty|sentenced|rigorous imprisonment|criminal breach of trust|debarred|disqualified as a director|barred from (?:trading|the securities market|holding))\b", re.I)
-EXONERATION = re.compile(r"\b(acquitted|acquittal|exonerated|discharged|quashed|set aside|closure report|no case (?:was )?made out)\b", re.I)
+# Tax and tribunal matters end in their own vocabulary: an addition deleted,
+# an appeal dismissed, relief granted, an order in favour of the assessee.
+EXONERATION = re.compile(r"\b(acquitted|acquittal|exonerated|discharged|quashed|set aside|closure report|no case (?:was )?made out|addition(?:s)? deleted|deleted the addition|appeal dismissed|dismissed the (?:revenue|department)|in favour of the assessee|relief granted|demand dropped|withdrawn|no addition)\b", re.I)
+BUSINESS_SHOW = re.compile(r"\b(shark tank|startup|start-up|entrepreneur|investor|business (?:show|programme|program|television|channel|news)|dragons.? den|podcast)\b", re.I)
+ONE_OFF_MEDIA = re.compile(r"\b(guest|interview(?:ed|ee)?|appeared on|panel(?:list)?|quoted|spoke (?:to|at)|featured in|episode)\b", re.I)
+RECURRING_MEDIA = re.compile(r"\b(host(?:s|ed|ing)?|judge|judging|presenter|presents|anchor|column(?:ist)?|his own (?:show|podcast)|regular(?:ly)?|series)\b", re.I)
+REGULATORY_MATTER = re.compile(r"\b(recall(?:ed|s)?|product safety|food safety|fssai|adulterat\w*|contaminat\w*|ethylene oxide|pesticide residue|licence (?:suspend\w*|cancel\w*)|license (?:suspend\w*|cancel\w*)|ban(?:ned)? (?:on )?(?:the )?sale|import alert|withdrawal from shelves|standards authority|regulator(?:y)? (?:action|notice|order|investigation))\b", re.I)
+INVESTMENT_VEHICLE = re.compile(r"\b(capital|investments?|holdings?|ventures?|securities|portfolio management|family office|asset management|fund|advisors|advisers|equity research|broking|wealth)\b", re.I)
+NOT_A_VALUE = re.compile(r"^(not[_\s-]?found|not[_\s-]?available|not[_\s-]?established|none|nil|n/?a|unknown|unavailable|no[_\s-]?data|-+|\u2014|\d+[.)]?|[.,;:]+)$", re.I)
+
+def vv(x):
+    t = "" if x is None else str(x).strip()
+    return "" if (not t or NOT_A_VALUE.match(t)) else t
+def is_business_show(f): return bool(f) and bool(BUSINESS_SHOW.search(_txt(f)))
+def is_one_off_media(f):
+    return bool(f) and bool(ONE_OFF_MEDIA.search(_txt(f))) and not RECURRING_MEDIA.search(_txt(f))
+def is_regulatory(f): return bool(f) and bool(REGULATORY_MATTER.search(_txt(f)))
+def is_investment_vehicle(sub, ledger):
+    def val(i):
+        f = ledger.get(i)
+        return f["value"] if f and f.get("status") == "found" else ""
+    hay = " ".join([str((sub or {}).get("company") or ""), str((sub or {}).get("industry") or ""),
+                    str(val("6a")), str(val("6j"))])
+    return bool(INVESTMENT_VEHICLE.search(hay))
+def means_from_evidence(ledger):
+    best = None
+    for i in ("d2", "3a", "1c", "2a"):
+        f = ledger.get(i)
+        if not f or f.get("status") != "found": continue
+        cr = amount_cr(_txt(f))
+        if cr is not None and (best is None or cr > best["cr"]): best = dict(cr=cr, note=f["value"])
+    return best
+
+PLAIN_WHAT = {
+    "g1": "political connections", "g2": "links to a property developer",
+    "g3": "practising as a lawyer", "g4": "working as a journalist",
+    "g5": "fame that would draw crowds or cameras to the building",
+    "g6": "a business media presence",
+    "g7": "an interest adjacent to property or infrastructure",
+    "5c": "court cases involving him or his fellow directors",
+    "5d": "court cases involving his family",
+    "e4": "a tax or regulatory dispute", "e5": "unpaid debts or insolvency",
+    "anchorConflict": "a clash with an existing occupier",
+}
 CONSUMER = re.compile(r"\b(consumer (?:court|forum|commission|dispute|redressal)|district commission|state commission|ncdrc|deficiency in service|small claims)\b", re.I)
 
 def _txt(f): return f"{(f or {}).get('value','')} {(f or {}).get('note','')}"
@@ -211,10 +257,14 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
         return cfg["baseTurnoverFloorCr"] * k, cfg["baseNetWorthFloorCr"] * k
 
     turn = get("6b");  cr  = cr_from(turn["value"]) if turn else None
+    vehicle = is_investment_vehicle(sub, ledger)
+    if vehicle: cr = None
     worth = get("3a"); wcr = cr_from(worth["value"]) if worth else None
     liq = get("d2");   liq_cr = cr_from(liq["value"]) if liq else None
     if liq_cr is not None and (wcr is None or liq_cr > wcr): wcr = liq_cr
     elif liq and wcr is None: wcr = cfg["baseNetWorthFloorCr"]
+    ev = means_from_evidence(ledger)
+    if ev and (wcr is None or ev["cr"] > wcr): wcr = ev["cr"]
 
     ticket = ticket_for(sub or {"budget": budget})
     need_t, need_w = required_for(ticket)
@@ -225,8 +275,8 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
             best = (lbl, tk)
     routes = []
     if cr is not None and cr >= need_t: routes.append(f"turnover {fmt_cr(cr)}")
-    if worth and wcr is not None and wcr >= need_w: routes.append(f"net worth {fmt_cr(wcr)}")
-    if liq and wcr is not None and wcr >= need_w and not worth: routes.append("liquidity event")
+    if wcr is not None and wcr >= need_w:
+        routes.append(ev["note"] if (ev and wcr == ev["cr"]) else f"net worth {fmt_cr(wcr)}")
     need_txt = f"needs {fmt_cr(need_t)}"
 
     if routes:
@@ -235,8 +285,10 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
         add("capacity", "Capacity against ticket", "qualifies lower",
             f"supports {best[0]}, not the {fmt_cr(ticket)} asked for", True)
     elif cr is None and wcr is None:
-        add("capacity", "Capacity against ticket", "not established", "no turnover, net worth or liquidity event found")
-    elif cr is not None and cr < cfg["baseTurnoverFloorCr"] * cfg["capacityRedBelowRatio"]:
+        add("capacity", "Capacity against ticket", "not established",
+            "an investment vehicle \u2014 its revenue says nothing about the owner\u2019s means"
+            if vehicle else "no turnover, net worth or liquidity event found")
+    elif cr is not None and cr < cfg["baseTurnoverFloorCr"] * cfg["capacityRedBelowRatio"] and wcr is None:
         add("capacity", "Capacity against ticket", "far below",
             f"{fmt_cr(cr)} turnover \u00b7 smallest unit needs {fmt_cr(cfg['baseTurnoverFloorCr'])}")
     else:
@@ -246,6 +298,12 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
                        ("g3","Practising lawyer"),("g4","Journalist"),("g5","Mass-market fame")]:
         f = get(fid)
         if not f: add(fid, label, "nothing found", "no match in the sources searched"); continue
+        # business television is the informational row, not the escalating one
+        if fid == "g5" and is_business_show(f):
+            add(fid, label, "nothing found", "business media rather than mass-market fame, recorded below")
+            if not get("g6"):
+                ledger["g6"] = dict(value=f["value"], status="found", source=f.get("source"), tier=f.get("tier"))
+            continue
         if fid == "g2" and cr is not None and cr >= cfg["developerCarveOutCr"]:
             add(fid, label, "exception applies", f"{f['value']} \u2014 above the {fmt_cr(cfg['developerCarveOutCr'])} carve-out"); continue
         add(fid, label, "for the screening authority", f["value"], True)
@@ -255,10 +313,17 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
     if not f: add("e4", "Regulatory or tax proceedings", "nothing found", "no match in the sources searched")
     else:
         sev = (f.get("severity") or "mention").lower()
-        amt = amount_cr(_txt(f))
+        if is_exonerated(f):
+            # a tax matter that went the client's way is not a matter at all
+            add("e4", "Regulatory or tax proceedings", "noted",
+                f"{f['value']} \u2014 decided in the client\u2019s favour")
+            f = None
+        amt = amount_cr(_txt(f)) if f else None
         tn = cr_from(get("6b")["value"]) if get("6b") else None
         bar = max(cfg["taxMaterialityCr"], (tn * cfg["taxMaterialityPctOfTurnover"] / 100) if tn is not None else 0)
-        if amt is not None and amt < bar:
+        if f is None:
+            pass
+        elif amt is not None and amt < bar:
             add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 small against the size of the business")
         elif sev == "mention": add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 press mention only")
         else: add("e4", "Regulatory or tax proceedings", "for the committee",
@@ -278,6 +343,10 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
         elif is_exonerated(f) and is_conviction(f): sev = "allegation"
         if is_minor(f, cfg) and not is_conviction(f):
             add(fid, label, "noted", f"{f['value']} \u2014 too small to bear on a purchase at this level"); continue
+        if is_regulatory(f) and not is_conviction(f):
+            if sev == "mention": add(fid, label, "noted", f"{f['value']} \u2014 regulatory, press mention only")
+            else: add(fid, label, "for the committee", f"{f['value']} \u2014 a regulatory matter, for the committee to weigh", True)
+            continue
         if is_tax(f):
             if sev == "mention": add(fid, label, "noted", f"{f['value']} \u2014 a tax matter, press mention only")
             else: add(fid, label, "for the committee", f"{f['value']} \u2014 a tax matter, for the committee to weigh", True)
@@ -289,7 +358,13 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
     f6 = get("g6")
     if not f6: add("g6", "Business media presence", "nothing found", "no match in the sources searched")
     elif is_body_role(f6): add("g6", "Business media presence", "nothing found", "an industry body role, recorded under standing")
+    elif is_one_off_media(f6): add("g6", "Business media presence", "nothing found", "a one-off appearance, not a media presence")
     else: add("g6", "Business media presence", "for information", f"{f6['value']} \u2014 noted, does not affect the rating")
+
+    f7 = get("g7")
+    if not f7: add("g7", "Adjacent to real estate or infrastructure", "nothing found", "Nothing found")
+    else: add("g7", "Adjacent to real estate or infrastructure", "for information",
+              f"{f7['value']} \u2014 noted, does not affect the rating")
 
     anchors = cfg.get("anchors") or []
     if anchors:
@@ -322,7 +397,8 @@ def brief(text, words=10):
 def breakdown(gates, ledger, anchor):
     def g(fid): return next((x for x in gates if x["id"] == fid), None)
     def get(fid):
-        f = ledger.get(fid); return f if f and f.get("status") == "found" else None
+        f = ledger.get(fid)
+        return f if f and f.get("status") == "found" and vv(f.get("value")) else None
     def src_of(ids):
         for i in ids:
             f = get(i)
@@ -365,12 +441,21 @@ def breakdown(gates, ledger, anchor):
              src=str(edu_f.get("source") or "") if edu_f else (anchor_src if edu else "")),
         restricted_row,
         row("Business media presence", g("g6"), ["g6"]),
+        row("Adjacent to property or infra", g("g7"), ["g7"]),
         row("Cases \u2014 immediate family", g("5d"), ["5d"])])
     push("Financial Capacity", [
         dict(label="Turnover", state="green" if turn else "grey", note=turn["value"] if turn else "not established", src=str(turn.get("source") or "") if turn else ""),
         dict(label="Net worth or liquidity", state="green" if nw else "grey", note=nw["value"] if nw else "not established", src=str(nw.get("source") or "") if nw else ""),
         dict(label="Fit to the ticket asked for", state=state_of(cap["result"]), note=cap["detail"], src=src_of(["6b","3a","d2"])),
         row("Default or insolvency", g("e5"), ["e5"])])
+    others, stand = get("6d"), get("6j")
+    push("Business context", [
+        dict(label="Standing in its industry", state="green" if stand else "grey",
+             note=stand["value"] if stand else "Industry position not established from public sources",
+             src=str(stand.get("source") or "") if stand else ""),
+        dict(label="Other companies and stakes", state="green" if others else "grey",
+             note=others["value"] if others else "No other directorships or shareholdings found",
+             src=str(others.get("source") or "") if others else "")])
     return dims
 def trim_gaps(gaps):
     out = []
