@@ -123,7 +123,7 @@ PLAIN_WHAT = {
     "g3": "practising as a lawyer", "g4": "working as a journalist",
     "g5": "fame that would draw crowds or cameras to the building",
     "g6": "a business media presence",
-    "g7": "an interest adjacent to property or infrastructure",
+    "g7": "a conflicting interest in real estate or infrastructure",
     "5c": "court cases involving him or his fellow directors",
     "5d": "court cases involving his family",
     "e4": "a tax or regulatory dispute", "e5": "unpaid debts or insolvency",
@@ -392,12 +392,11 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
     if not f6: add("g6", "Business media presence", "nothing found", "no match in the sources searched")
     elif is_body_role(f6): add("g6", "Business media presence", "nothing found", "an industry body role, recorded under standing")
     elif is_one_off_media(f6): add("g6", "Business media presence", "nothing found", "a one-off appearance, not a media presence")
-    else: add("g6", "Business media presence", "for information", f"{f6['value']} \u2014 noted, does not affect the rating")
+    else: add("g6", "Business media presence", "for information", f"{f6['value']}")
 
     f7 = get("g7")
-    if not f7: add("g7", "Adjacent to real estate or infrastructure", "nothing found", "Nothing found")
-    else: add("g7", "Adjacent to real estate or infrastructure", "for information",
-              f"{f7['value']} \u2014 noted, does not affect the rating")
+    if not f7: add("g7", "Conflicting interests in real estate or infra", "nothing found", "Nothing found")
+    else: add("g7", "Conflicting interests in real estate or infra", "for information", f7["value"])
 
     anchors = cfg.get("anchors") or []
     if anchors:
@@ -474,21 +473,19 @@ def breakdown(gates, ledger, anchor):
              src=str(edu_f.get("source") or "") if edu_f else (anchor_src if edu else "")),
         restricted_row,
         row("Business media presence", g("g6"), ["g6"]),
-        row("Adjacent to property or infra", g("g7"), ["g7"]),
+        row("Conflicting interests in real estate or infra", g("g7"), ["g7"]),
         row("Cases \u2014 immediate family", g("5d"), ["5d"])])
     push("Financial Capacity", [
         dict(label="Turnover", state="green" if turn else "grey", note=turn["value"] if turn else "not established", src=str(turn.get("source") or "") if turn else ""),
         dict(label="Net worth or liquidity", state="green" if nw else "grey", note=nw["value"] if nw else "not established", src=str(nw.get("source") or "") if nw else ""),
         dict(label="Fit to the ticket asked for", state=state_of(cap["result"]), note=cap["detail"], src=src_of(["6b","3a","d2"])),
+        dict(label="Standing in its industry", state="green" if get("6j") else "grey",
+             note=get("6j")["value"] if get("6j") else "Industry position not established from public sources",
+             src=str(get("6j").get("source") or "") if get("6j") else ""),
+        dict(label="Other companies and stakes", state="green" if get("6d") else "grey",
+             note=get("6d")["value"] if get("6d") else "No other directorships or shareholdings found",
+             src=str(get("6d").get("source") or "") if get("6d") else ""),
         row("Default or insolvency", g("e5"), ["e5"])])
-    others, stand = get("6d"), get("6j")
-    push("Business context", [
-        dict(label="Standing in its industry", state="green" if stand else "grey",
-             note=stand["value"] if stand else "Industry position not established from public sources",
-             src=str(stand.get("source") or "") if stand else ""),
-        dict(label="Other companies and stakes", state="green" if others else "grey",
-             note=others["value"] if others else "No other directorships or shareholdings found",
-             src=str(others.get("source") or "") if others else "")])
     return dims
 def trim_gaps(gaps):
     out = []
