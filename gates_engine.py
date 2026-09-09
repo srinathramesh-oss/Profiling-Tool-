@@ -22,8 +22,9 @@ ROUTINE_PROMPT.md already calls):
   claim --row N
   evaluate --sub '<json>' --anchor '<json>' --ledger '<json>'
   workbook --sub '<json>' --anchor '<json>' --ledger '<json>' --notes '<json>'
-  writeback --row N --verdict V --confidence C --summary S --reasoning R
-             --gaps '["...","..."]' --escalations E --evidence_url U
+  writeback --row N --verdict V --confidence C --summary S --why W
+             --breakdown '<json>' --gaps '["...","..."]' --escalations E
+             --evidence_url U
   fail --row N --reason "..."
 
 ENVIRONMENT
@@ -310,11 +311,11 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
         add("capacity", "Capacity against ticket", "qualifies lower",
             f"supports {best[0]}, not the {fmt_cr(ticket)} asked for", True)
     elif is_non_commercial(sub, ledger) and wcr is None:
-        add("capacity", "Capacity against ticket", "not established",
+        add("capacity", "Capacity against ticket", "Not established",
             "no owner-operated business \u2014 the institution\u2019s finances are not his, "
             "so means must be established directly")
     elif cr is None and wcr is None:
-        add("capacity", "Capacity against ticket", "not established",
+        add("capacity", "Capacity against ticket", "Not established",
             "an investment vehicle \u2014 its revenue says nothing about the owner\u2019s means"
             if vehicle else "no turnover, net worth or liquidity event found")
     elif cr is not None and cr < cfg["baseTurnoverFloorCr"] * cfg["capacityRedBelowRatio"] and wcr is None:
@@ -407,7 +408,7 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
         if hit: add("anchorConflict", "Conflict with an existing occupier", "for the committee",
                     f"same line of business as {hit['occupier']} ({hit['line']})", True)
         elif ind: add("anchorConflict", "Conflict with an existing occupier", "nothing found", "no overlap with any anchor occupier")
-        else: add("anchorConflict", "Conflict with an existing occupier", "not established", "client\u2019s line of business not established")
+        else: add("anchorConflict", "Conflict with an existing occupier", "Not established", "client\u2019s line of business not established")
     return G
 
 # ---------------------------------------------------------------- breakdown (mirrors Code.gs)
@@ -416,7 +417,7 @@ RAG_RANK = dict(grey=0, green=1, amber=2, red=3)
 def state_of(result):
     if result in ("disqualifying", "far below"): return "red"
     if result in ("nothing found", "pass", "exception applies", "noted"): return "green"
-    if result in ("not established", "untestable"): return "grey"
+    if result in ("Not established", "not established", "untestable"): return "grey"
     return "amber"  # includes 'for information': shown, never decides
 def worst(states): return max(states, key=lambda s: RAG_RANK[s]) if states else "grey"
 def brief(text, words=10):
@@ -443,6 +444,7 @@ def breakdown(gates, ledger, anchor):
         "Business Reputation": "Indian Kanoon and the eCourts portal for judgments; NCLT, NCLAT, IBBI and SEBI for orders; LiveLaw and Bar & Bench for reported cases; the business press.",
         "Personal Image": "Sworn election affidavits via MyNeta and ADR; Lok Sabha and Rajya Sabha member pages; Bar Council rolls; the company's own leadership biography; verified social accounts.",
         "Financial Capacity": "BSE and NSE filings, the company's annual report and investor pages; MCA master data via Zauba Corp, Tofler and The Company Check; shareholding patterns filed with the exchanges.",
+        "Sensitive Profile": "Sworn election affidavits via MyNeta and the Association for Democratic Reforms; Lok Sabha and Rajya Sabha member pages; Bar Council rolls; state RERA promoter registries; the outlet's own masthead; verified social accounts.",
     }
     dims = []
     def push(name, subs):
@@ -471,10 +473,13 @@ def breakdown(gates, ledger, anchor):
     push("Personal Image", [
         dict(label="Education", state="green" if edu else "grey", note=edu or "not established",
              src=str(edu_f.get("source") or "") if edu_f else (anchor_src if edu else "")),
+        row("Cases \u2014 immediate family", g("5d"), ["5d"])])
+    # The screens the policy asks a committee to look at are one question, and
+    # not a footnote to what kind of person this is.
+    push("Sensitive Profile", [
         restricted_row,
         row("Business media presence", g("g6"), ["g6"]),
-        row("Conflicting interests in real estate or infra", g("g7"), ["g7"]),
-        row("Cases \u2014 immediate family", g("5d"), ["5d"])])
+        row("Conflicting interests in real estate or infra", g("g7"), ["g7"])])
     push("Financial Capacity", [
         dict(label="Turnover", state="green" if turn else "grey", note=turn["value"] if turn else "not established", src=str(turn.get("source") or "") if turn else ""),
         dict(label="Net worth or liquidity", state="green" if nw else "grey", note=nw["value"] if nw else "not established", src=str(nw.get("source") or "") if nw else ""),
@@ -496,6 +501,41 @@ def trim_gaps(gaps):
         t = re.sub(r"[.,;:\s]+$", "", t)
         if t: out.append(t)
     return out
+
+# A Green built on twelve findings and a Green built on almost none read the
+# same, and the person walking into the room cannot tell them apart.
+def thin_evidence(ledger):
+    have = [i for i in ("6b","3a","d2","6a","6d","6j","i7","5a","i2","1a","6e")
+            if (ledger.get(i) or {}).get("status") == "found" and vv((ledger.get(i) or {}).get("value"))]
+    return len(have) <= 2
+
+def why_line(gates, verdict, ledger):
+    """One line naming what actually decided the rating, built from the gates,
+    so it cannot say anything the scoreboard does not. Code.gs writes the same
+    line into Rating Reason, and the panel, the PDF and the decision email all
+    read it \u2014 a routine-enriched row without it arrives looking blank."""
+    dq  = [g for g in gates if g["result"] == "disqualifying"]
+    esc = [g for g in gates if g["escalate"] and g["id"] != "capacity"]
+    cap = next((g for g in gates if g["id"] == "capacity"), {})
+    idg = next((g for g in gates if g["id"] == "identity"), {})
+    nm  = lambda g: PLAIN_WHAT.get(g["id"], str(g.get("label", "")).lower())
+    def lst(gs):
+        return re.sub(r", ([^,]*)$", r" and \1", ", ".join(nm(g) for g in gs))
+    if verdict == "Red":
+        if dq: return "Does not proceed \u2014 " + lst(dq) + "."
+        if cap.get("result") == "far below":
+            return "Does not proceed \u2014 the business is too small for the smallest unit."
+        return "Does not proceed."
+    if verdict == "Amber":
+        bits = []
+        if esc: bits.append(lst(esc))
+        if idg.get("result") != "pass": bits.append("an identity we could not confirm")
+        if cap.get("result") == "short": bits.append("means that fall short of the ticket")
+        if cap.get("result") == "qualifies lower": bits.append("a smaller unit than the one asked for")
+        return ("For a decision: " + "; ".join(bits) + ".") if bits else "For a decision before a meeting is offered."
+    return ("Nothing blocking. Proceed to a meeting \u2014 though little was available publicly, "
+            "so there is more to establish in the room than usual.") if thin_evidence(ledger or {}) \
+           else "Nothing blocking. Proceed to a meeting."
 
 def rate(G):
     by = {g["id"]: g for g in G}
@@ -729,6 +769,11 @@ def cmd_identity(a):
         name = vals[H["Client Name"]] if H["Client Name"] < len(vals) else ""
     except Exception:
         inter, name = [], ""
+    # The desk matches a repeat client on the sound of the name it was given
+    # the first time, so what was typed is worth keeping alongside what it
+    # resolved to. Three cards is the most anyone can choose between.
+    if not anchor.get("typed_name"): anchor["typed_name"] = name
+    if isinstance(anchor.get("candidates"), list): anchor["candidates"] = anchor["candidates"][:3]
     cfg = load_config(sheets)
     matched = bool(anchor.get("resolved")) and float(anchor.get("confidence") or 0) >= cfg["identityMin"]
     inter.append(dict(t=now_iso(), who="System", text=(
@@ -756,7 +801,9 @@ def cmd_evaluate(a):
     sub = json.loads(a.sub); anchor = json.loads(a.anchor) if a.anchor else None
     ledger = json.loads(a.ledger)
     gates = evaluate_gates(ledger, anchor, sub.get("budget",""), cfg, sub)
-    print(json.dumps(dict(gates=gates, verdict=rate(gates), breakdown=breakdown(gates, ledger, anchor))))
+    verdict = rate(gates)
+    print(json.dumps(dict(gates=gates, verdict=verdict, why=why_line(gates, verdict, ledger),
+                          breakdown=breakdown(gates, ledger, anchor))))
 
 def cmd_workbook(a):
     sheets, drive = gauth()
@@ -778,9 +825,9 @@ def cmd_writeback(a):
         inter = json.loads(vals[H["Interactions"]]) if H.get("Interactions") is not None and H["Interactions"] < len(vals) and vals[H["Interactions"]] else []
     except Exception:
         inter = []
-    inter.append(dict(t=now_iso(), who="System", text="Profile enriched and sent for approval."))
+    inter.append(dict(t=now_iso(), who="System", text="Profile enriched."))
     a1 = lambda c: f"{LEADS}!{col(H[c])}{a.row}"
-    write_cells(sheets, [
+    cells = [
         (a1("Rating"), a.verdict), (a1("Identity Confidence"), a.confidence),
         (a1("Profile Summary"), a.summary),
         # the column keeps its name; it now carries the breakdown JSON
@@ -789,7 +836,16 @@ def cmd_writeback(a):
         (a1("Escalations"), a.escalations or ""), (a1("Evidence Report"), a.evidence_url or ""),
         (a1("Interactions"), json.dumps(inter)), (a1("Status"), ST["PENDING"]),
         (a1("Last Run"), now_iso()),
-    ])
+    ]
+    # The one line naming what decided it. The panel, the PDF and the email all
+    # read this column, and a row enriched here used to leave it empty.
+    why = (a.why or a.reasoning or "").strip()
+    if "Rating Reason" in H and why: cells.append((a1("Rating Reason"), why))
+    write_cells(sheets, cells)
+    # What happens next — Green cleared, Red declined, Amber to a person — is
+    # decided in one place only, by applyVerdict_ in Code.gs, which picks this
+    # row up within five minutes and sends whichever email goes with it. Two
+    # engines deciding the same thing is how they drift apart.
     print(json.dumps(dict(ok=True)))
 
 def cmd_fail(a):
@@ -817,6 +873,7 @@ def main():
     c.add_argument("--row", type=int, required=True); c.add_argument("--verdict", required=True)
     c.add_argument("--confidence", default=""); c.add_argument("--summary", required=True)
     c.add_argument("--reasoning", default=""); c.add_argument("--breakdown", default="")
+    c.add_argument("--why", default="")
     c.add_argument("--gaps", default="[]")
     c.add_argument("--escalations", default=""); c.add_argument("--evidence_url", default="")
     c.set_defaults(fn=cmd_writeback)
