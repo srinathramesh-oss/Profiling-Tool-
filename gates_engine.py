@@ -262,13 +262,24 @@ def cr_from(text):
     m = re.search(r"([\d.]+)\s*(crore|cr\b)", t, re.I)
     return float(m.group(1)) if m else None
 
-def evaluate_gates(ledger, anchor, budget, cfg, sub=None):
+def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
     G = []
     def get(fid):
         f = ledger.get(fid)
         return f if f and f.get("status") == "found" else None
     def add(fid, label, result, detail, escalate=False):
         G.append(dict(id=fid, label=label, result=result, detail=detail, escalate=escalate))
+
+    # Before anything is judged: were the searches that would find it made?
+    # A clean answer from a run that skipped them is not a clean answer.
+    missing, unverified = apply_coverage(ledger, searches_run)
+    if missing:
+        add("coverage", "Searches actually run", "incomplete",
+            "%d of %d mandatory searches were not run (%s) \u2014 %d field(s) unverified, so this cannot be cleared"
+            % (len(missing), len(MANDATORY), ", ".join(missing), len(unverified)))
+    else:
+        add("coverage", "Searches actually run", "pass",
+            "all %d mandatory searches declared" % len(MANDATORY))
 
     conf = float((anchor or {}).get("confidence") or 0)
     add("identity", "Identity resolved", "pass" if conf >= cfg["identityMin"] else "unresolved",
@@ -537,6 +548,66 @@ def why_line(gates, verdict, ledger):
             "so there is more to establish in the room than usual.") if thin_evidence(ledger or {}) \
            else "Nothing blocking. Proceed to a meeting."
 
+# ---------------------------------------------------------------- search coverage
+#
+# THE PROBLEM THIS SOLVES.
+#
+# The same client came back Declined on one run and Needs Review on the next.
+# Both ratings were correct for the evidence in front of them: the second run
+# simply never reached the insolvency filing the first one found. Research over
+# web search is not repeatable, and the prompt already listed the searches that
+# must be run — but nothing checked that they were, so a shallow run and a
+# clean one were indistinguishable.
+#
+# So the routine now declares what it searched, and this verifies it. Where a
+# mandatory search was not run, the fields it covers cannot be read as clean:
+# "not_found" becomes "not_searched", which is a gap rather than a pass, and a
+# profile with gaps cannot come out Green.
+#
+# The principle: AN ABSENCE OF EVIDENCE ONLY COUNTS IF THE SEARCH WAS MADE.
+
+MANDATORY = [
+    # id,           what it must have looked for,                covers these fields
+    ("kanoon_person", r"indiankanoon.*(name|person)|indiankanoon\.org",     ["5a", "5b"]),
+    ("kanoon_company", r"indiankanoon.*compan|compan.*indiankanoon",         ["5a", "5c"]),
+    ("criminal",      r"\b(fir|chargesheet|charge sheet|criminal|complaint)\b", ["5a", "5b"]),
+    ("company_suit",  r"\b(petition|suit|versus|\bv\.\b|court order)\b",      ["5c"]),
+    ("regulator",     r"\b(sebi|enforcement directorate|\bed\b|cbi|eow|economic offences)\b", ["e4", "5a"]),
+    # the one that was missed: solvency of the company itself
+    ("insolvency",    r"\b(nclt|nclat|ibbi|insolvenc\w*|cirp|liquidat\w*|wilful defaulter|wilful default|default)\b", ["e5", "6b", "3a"]),
+    ("hindi",         r"(hindi|devanagari|regional language)",              ["5b"]),
+    ("outcome",       r"\b(settle\w*|withdrawn|quash\w*|acquitt\w*|appeal|stay)\b", ["5a", "5b"]),
+    # financial lane, mandatory from now on for the same reason
+    ("filings",       r"\b(mca|zauba|tofler|thecompanycheck|indiafilings|annual report|bse|nse|screener)\b", ["6b", "3a"]),
+]
+
+def coverage(searches_run):
+    """Which mandatory searches the routine did not declare, and the fields
+    left unverified as a result."""
+    hay = " ; ".join(str(s) for s in (searches_run or [])).lower()
+    missing, unverified = [], set()
+    for sid, pattern, fields in MANDATORY:
+        if not re.search(pattern, hay, re.I):
+            missing.append(sid)
+            unverified.update(fields)
+    return missing, unverified
+
+def apply_coverage(ledger, searches_run):
+    """A field the searches never covered is a gap, not a clean result. Returns
+    the missing search ids so the rating and the write-up can say so."""
+    missing, unverified = coverage(searches_run)
+    if not missing:
+        return [], set()
+    for fid in unverified:
+        f = ledger.get(fid)
+        if f is None:
+            # never looked at, and never searched for: record it as such
+            ledger[fid] = dict(status="not_searched", value="", source="", note="the searches that would find this were not run")
+        elif str(f.get("status", "")).lower() in ("not_found", ""):
+            f["status"] = "not_searched"
+            f["note"] = ((f.get("note") or "") + " Not established: the mandatory searches for this were not run.").strip()
+    return missing, unverified
+
 def rate(G):
     by = {g["id"]: g for g in G}
     if any(g["result"] == "disqualifying" for g in G): return "Red"
@@ -544,6 +615,10 @@ def rate(G):
     if any(g["escalate"] for g in G): return "Amber"
     if by["identity"]["result"] != "pass": return "Amber"
     if by["capacity"]["result"] in ("qualifies lower", "short"): return "Amber"
+    # Nothing may be cleared on a search that was never made. A run that
+    # skipped its mandatory searches cannot produce a clean profile, however
+    # little it happened to find.
+    if "coverage" in by and by["coverage"]["result"] != "pass": return "Amber"
     return "Green"
 
 # ---------------------------------------------------------------- evidence xlsx (Alibaug format)
@@ -800,10 +875,16 @@ def cmd_evaluate(a):
     cfg = load_config(sheets); cfg["anchors"] = load_anchors(sheets)
     sub = json.loads(a.sub); anchor = json.loads(a.anchor) if a.anchor else None
     ledger = json.loads(a.ledger)
-    gates = evaluate_gates(ledger, anchor, sub.get("budget",""), cfg, sub)
+    try:
+        searches_run = json.loads(a.searches) if a.searches else []
+    except Exception:
+        searches_run = [a.searches] if a.searches else []
+    gates = evaluate_gates(ledger, anchor, sub.get("budget",""), cfg, sub, searches_run)
     verdict = rate(gates)
+    missing, _ = coverage(searches_run)
     print(json.dumps(dict(gates=gates, verdict=verdict, why=why_line(gates, verdict, ledger),
-                          breakdown=breakdown(gates, ledger, anchor))))
+                          breakdown=breakdown(gates, ledger, anchor),
+                          searches_missing=missing)))
 
 def cmd_workbook(a):
     sheets, drive = gauth()
@@ -864,7 +945,9 @@ def main():
     c.add_argument("--anchor", default=""); c.set_defaults(fn=cmd_identity)
     c = sub.add_parser("evaluate")
     c.add_argument("--sub", required=True); c.add_argument("--anchor", default="")
-    c.add_argument("--ledger", required=True); c.set_defaults(fn=cmd_evaluate)
+    c.add_argument("--ledger", required=True)
+    c.add_argument("--searches", default="", help="JSON array of the searches actually run")
+    c.set_defaults(fn=cmd_evaluate)
     c = sub.add_parser("workbook")
     c.add_argument("--sub", required=True); c.add_argument("--anchor", default="")
     c.add_argument("--ledger", required=True); c.add_argument("--notes", default="")
