@@ -567,18 +567,20 @@ def why_line(gates, verdict, ledger):
 # The principle: AN ABSENCE OF EVIDENCE ONLY COUNTS IF THE SEARCH WAS MADE.
 
 MANDATORY = [
-    # id,           what it must have looked for,                covers these fields
-    ("kanoon_person", r"indiankanoon.*(name|person)|indiankanoon\.org",     ["5a", "5b"]),
-    ("kanoon_company", r"indiankanoon.*compan|compan.*indiankanoon",         ["5a", "5c"]),
-    ("criminal",      r"\b(fir|chargesheet|charge sheet|criminal|complaint)\b", ["5a", "5b"]),
-    ("company_suit",  r"\b(petition|suit|versus|\bv\.\b|court order)\b",      ["5c"]),
-    ("regulator",     r"\b(sebi|enforcement directorate|\bed\b|cbi|eow|economic offences)\b", ["e4", "5a"]),
-    # the one that was missed: solvency of the company itself
-    ("insolvency",    r"\b(nclt|nclat|ibbi|insolvenc\w*|cirp|liquidat\w*|wilful defaulter|wilful default|default)\b", ["e5", "6b", "3a"]),
-    ("hindi",         r"(hindi|devanagari|regional language)",              ["5b"]),
-    ("outcome",       r"\b(settle\w*|withdrawn|quash\w*|acquitt\w*|appeal|stay)\b", ["5a", "5b"]),
-    # financial lane, mandatory from now on for the same reason
-    ("filings",       r"\b(mca|zauba|tofler|thecompanycheck|indiafilings|annual report|bse|nse|screener)\b", ["6b", "3a"]),
+    # The field ids matter: 5c is litigation against the individual and
+    # co-directors, 5d the family, e4 regulatory and tax, e5 default and
+    # insolvency, e6 adverse media. 5a and 5b are seniority and standing and
+    # have nothing to do with any of this.
+    ("kanoon_person",  r"indiankanoon",                                                   ["5c", "5d"]),
+    ("kanoon_company", r"indiankanoon[^;]*compan|compan[^;]*indiankanoon|compan[^;]*kanoon", ["5c"]),
+    ("criminal",       r"\b(fir|chargesheet|charge sheet|criminal|complaint)\b",          ["5c", "5d"]),
+    ("company_suit",   r"\b(petition|suit|versus|court order|litigation)\b",              ["5c"]),
+    ("regulator",      r"\b(sebi|enforcement directorate|\bed\b|cbi|eow|economic offences|rbi)\b", ["e4"]),
+    ("insolvency",     r"\b(nclt|nclat|ibbi|insolvenc\w*|cirp|liquidat\w*|wilful default\w*|default|npa)\b", ["e5", "6b", "3a"]),
+    ("hindi",          r"(hindi|devanagari|regional language)",                            ["5c", "e6"]),
+    ("outcome",        r"\b(settle\w*|withdrawn|quash\w*|acquitt\w*|appeal|stay|overturn\w*)\b", ["5c", "e4"]),
+    ("filings",        r"\b(mca|zauba|tofler|thecompanycheck|indiafilings|annual report|bse|nse|screener)\b", ["6b", "3a", "6c"]),
+    ("media",          r"\b(news|media|press|report\w*|coverage)\b",                      ["e6"]),
 ]
 
 def coverage(searches_run):
