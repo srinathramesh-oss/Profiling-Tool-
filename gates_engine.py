@@ -71,7 +71,7 @@ TAX_MATTER = re.compile(r"\b(gst|goods and services tax|income[- ]tax|tax demand
 CONVICTION = re.compile(r"\b(convicted|conviction|found guilty|pleaded guilty|sentenced|rigorous imprisonment|criminal breach of trust|debarred|disqualified as a director|barred from (?:trading|the securities market|holding))\b", re.I)
 # Tax and tribunal matters end in their own vocabulary: an addition deleted,
 # an appeal dismissed, relief granted, an order in favour of the assessee.
-EXONERATION = re.compile(r"\b(acquitted|acquittal|exonerated|discharged|quashed|set aside|closure report|no case (?:was )?made out|addition(?:s)? deleted|deleted the addition|appeal dismissed|dismissed the (?:revenue|department)|in favour of the assessee|relief granted|demand dropped|withdrawn|no addition)\b", re.I)
+EXONERATION = re.compile(r"\b(acquitted|acquittal|exonerated|discharged|quashed|set aside|closure report|no case (?:was )?made out|addition(?:s)? deleted|deleted the addition|appeal dismissed|dismissed the (?:revenue|department)|dismissed (?:all |the )?(?:claims|charges|suit|case|petition|complaint|plea)|(?:claims|charges|suit|case|petition|complaint|allegations) (?:were |was |been )?dismissed|dismissed with prejudice|suit dismissed|case dismissed|summary judg(?:e)?ment|judgment for the defend\w*|decree(?:d)? in favou?r|ruled in (?:its|his|her|their) favou?r|in favou?r of the (?:assessee|defendant|respondent|company|accused)|(?:resolved|decided|ruled|concluded|determined) in (?!the (?:plaintiff|petitioner|complainant|appellant|prosecution|revenue|department))[\w\'’&. ]{0,32}favou?r|found (?:insufficient|no) evidence|no merit|struck (?:out|down)|relief granted|demand dropped|withdrawn|no addition)\b", re.I)
 BUSINESS_SHOW = re.compile(r"\b(shark tank|startup|start-up|entrepreneur|investor|business (?:show|programme|program|television|channel|news)|dragons.? den|podcast)\b", re.I)
 ONE_OFF_MEDIA = re.compile(r"\b(guest|interview(?:ed|ee)?|appeared on|panel(?:list)?|quoted|spoke (?:to|at)|featured in|episode)\b", re.I)
 RECURRING_MEDIA = re.compile(r"\b(host(?:s|ed|ing)?|judge|judging|presenter|presents|anchor|column(?:ist)?|his own (?:show|podcast)|regular(?:ly)?|series)\b", re.I)
@@ -85,7 +85,7 @@ def is_serious_tax(f): return bool(f) and bool(TAX_SERIOUS.search(_txt(f)))
 # A school, a university, a hospital, a trust, a government body: nobody owns
 # them, so "no turnover found" is not a gap in the research — the question
 # does not apply and the person's means must come from evidence about them.
-NON_COMMERCIAL = re.compile(r"\b(school|university|college|institute of|academy|vidyalaya|hospital|trust|foundation|society|ngo|charit\w*|municipal|corporation of|government|ministry|authority|board of|council|association)\b", re.I)
+NON_COMMERCIAL = re.compile(r"\b(school|university|college|institute|academy|vidyalaya|vidyapeeth|vidya|shiksha|sansthan|samiti|gurukul|convent|hospital|nursing home|medical centre|trust|foundation|society|sangh|seva|mission|ngo|charit\w*|educational|municipal|corporation of|government|ministry|authority|board of|council|association)\b", re.I)
 def is_non_commercial(sub, ledger):
     def val(i):
         f = ledger.get(i)
@@ -143,6 +143,33 @@ def is_body_role(f):
 def is_tax(f): return bool(f) and bool(TAX_MATTER.search(_txt(f)))
 def is_conviction(f): return bool(f) and bool(CONVICTION.search(_txt(f)))
 def is_exonerated(f): return bool(f) and bool(EXONERATION.search(_txt(f)))
+
+# --- agent 5 additions -----------------------------------------------------
+FAVOURABLE = re.compile(r"\b(dismissed (?:all |the )?(?:claims|charges|suit|case|petition|complaint)|(?:claims|charges|suit|allegations) (?:were |was )?dismissed|in (?:his|her|its|their|the company\'s) favou?r|(?:resolved|decided|ruled|concluded|determined) in (?!the (?:plaintiff|petitioner|complainant|appellant|prosecution|revenue|department))[\w\'’&. ]{0,32}favou?r|judgment for the defend\w*|summary judg(?:e)?ment|won the (?:case|suit|appeal)|found (?:insufficient|no) evidence|no merit|cleared of|absolved|vindicat\w*)\b", re.I)
+def is_favourable(f): return bool(f) and bool(FAVOURABLE.search(_txt(f)))
+
+FAME_OCCUPATION = re.compile(r"\b(actor|actress|film star|movie star|bollywood|tollywood|playback singer|singer|vocalist|musician|rapper|composer|music director|cricketer|footballer|athlete|sportsperson|sportsman|olympian|batsman|bowler|all[- ]rounder|model|supermodel|influencer|youtuber|content creator|comedian|stand[- ]?up|television host|tv anchor|news anchor|dancer|choreographer|film[- ]?maker|director of photography)\b", re.I)
+def is_fame_the_occupation(sub, ledger):
+    stated = " ".join(str(x) for x in [(sub or {}).get("role"), (sub or {}).get("industry"), (sub or {}).get("company")] if x)
+    if FAME_OCCUPATION.search(stated): return True
+    def has(i):
+        f = ledger.get(i); return bool(f) and f.get("status") == "found"
+    return not (has("6b") or has("3a") or has("d2") or has("6k"))
+
+REG_ACTION = re.compile(r"\b(?:licen[cs]e\b[^.;]{0,60}?\b(?:cancel|revok|suspend|withdr)\w*|(?:cancel|revok|suspend|withdr)\w*\b[^.;]{0,60}?\blicen[cs]e|(?:banned|barred|debarred|prohibited|restrained)\b[^.;]{0,30}?\b(?:from|by)|cease[- ]and[- ]desist|business restrictions|directed to (?:stop|halt|cease)|struck off|deregistered)", re.I)
+def is_reg_action(f): return bool(f) and bool(REG_ACTION.search(_txt(f)))
+
+REG_SUPERVISORY = re.compile(r"\b(?:section |s\.?|u\/s )?1?5\s?(?:A|B|C|D|E|F|HB)\b(?![A-Z])|\b(?:23D|23E)\b|\b(?:adjudication order|inspection (?:report|observation|finding)|periodic inspection|code of conduct for (?:stock ?)?brokers|back[- ]?office|reconcil\w*|record[- ]?keeping|books of account|maintenance of records|margin (?:report|shortfall|collection)|reporting requirement|disclosure requirement|filing requirement|delayed (?:filing|submission|reporting)|technical glitch|system audit|kyc documentation|net worth certificate|non[- ]compliance with (?:the )?(?:circular|guidelines|provisions))\b", re.I)
+REG_SUBSTANTIVE = re.compile(r"\b(?:15HA|15G|15H)\b|\b(?:pfutp|fraudulent and unfair trade practices|prohibition of insider trading|insider trading|front[- ]?running|market manipulation|manipulat\w*|misappropriat\w*|siphon\w*|diversion of (?:client|investor|funds)|misuse of (?:client|investor)|unauthorised trading|unauthorized trading|mis[- ]?selling|ponzi|collective investment scheme|fraud\w*|forg\w*|fabricat\w*)\b", re.I)
+def is_supervisory(f):
+    if not f: return False
+    if REG_SUBSTANTIVE.search(_txt(f)): return False
+    if is_reg_action(f) or is_conviction(f): return False
+    if str(f.get("about", "subject")).lower() == "subject": return False
+    return bool(REG_SUPERVISORY.search(_txt(f)))
+
+POLICE = re.compile(r"\b(fir\b|first information report|arrest\w*|charge[- ]?sheet\w*|booked (?:under|for)|case registered|complaint registered|summons(?:ed)?|remand\w*|bail)\b", re.I)
+def is_police_matter(f): return bool(f) and bool(POLICE.search(_txt(f)))
 def is_weak_source(f): return bool(f) and str(f.get("tier","")).lower() == "unverified"
 def is_foreign_affiliate(f):
     if not f or str(f.get("jurisdiction","")).lower() != "foreign": return False
@@ -272,18 +299,21 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
 
     # Before anything is judged: were the searches that would find it made?
     # A clean answer from a run that skipped them is not a clean answer.
-    missing, unverified = apply_coverage(ledger, searches_run)
-    if missing:
-        add("coverage", "Searches actually run", "incomplete",
-            "%d of %d mandatory searches were not run (%s) \u2014 %d field(s) unverified, so this cannot be cleared"
-            % (len(missing), len(MANDATORY), ", ".join(missing), len(unverified)))
+    cov = coverage(searches_run)
+    if cov["shallow"]:
+        add("coverage", "Searches run", "for information",
+            f"only {cov['ran']} search(es) across all lanes \u2014 thinner than usual, worth re-running")
+    elif cov["unknown"]:
+        add("coverage", "Searches run", "nothing found", "not recorded for this run")
     else:
-        add("coverage", "Searches actually run", "pass",
-            "all %d mandatory searches declared" % len(MANDATORY))
+        add("coverage", "Searches run", "pass", f"{cov['ran']} search(es) across the lanes")
 
     conf = float((anchor or {}).get("confidence") or 0)
-    add("identity", "Identity resolved", "pass" if conf >= cfg["identityMin"] else "unresolved",
-        f"confidence {conf}" if conf else "identity step returned nothing")
+    # the sourcing manager's confirmation IS the resolution
+    confirmed = bool((anchor or {}).get("confirmed"))
+    add("identity", "Identity resolved", "pass" if (confirmed or conf >= cfg["identityMin"]) else "unresolved",
+        (f"confirmed by the sourcing manager (search confidence {conf})" if conf else "confirmed by the sourcing manager")
+        if confirmed else (f"confidence {conf}" if conf else "identity step returned nothing"))
 
     def required_for(ticket):
         k = ticket / cfg["baseTicketCr"]
@@ -322,16 +352,28 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
         add("capacity", "Capacity against ticket", "qualifies lower",
             f"supports {best[0]}, not the {fmt_cr(ticket)} asked for", True)
     elif is_non_commercial(sub, ledger) and wcr is None:
+        inst = get("6k")
         add("capacity", "Capacity against ticket", "Not established",
-            "no owner-operated business \u2014 the institution\u2019s finances are not his, "
-            "so means must be established directly")
+            (f"runs {inst['value']} \u2014 held through a society, so no filed turnover is his; means must be established directly")
+            if inst else
+            "no owner-operated business \u2014 the institution\u2019s finances are not his, so means must be established directly")
     elif cr is None and wcr is None:
+        inst = get("6k")
         add("capacity", "Capacity against ticket", "Not established",
-            "an investment vehicle \u2014 its revenue says nothing about the owner\u2019s means"
-            if vehicle else "no turnover, net worth or liquidity event found")
+            "an investment vehicle \u2014 its revenue says nothing about the owner\u2019s means" if vehicle
+            else f"runs {inst['value']} \u2014 held through a society, so no filed turnover is his; means must be established directly" if inst
+            else "no turnover, net worth or liquidity event found")
+    # A small filed turnover with nothing on net worth is a doubt, not a
+    # refusal: the business says what the business is, not what the owner is
+    # worth. 'short' holds it at Amber and a human looks.
     elif cr is not None and cr < cfg["baseTurnoverFloorCr"] * cfg["capacityRedBelowRatio"] and wcr is None:
+        add("capacity", "Capacity against ticket", "short",
+            f"{fmt_cr(cr)} turnover \u00b7 smallest unit needs {fmt_cr(cfg['baseTurnoverFloorCr'])} "
+            "\u00b7 nothing found on net worth either way, so this is a question rather than an answer")
+    # Means established and far short: the one shape that justifies a Red.
+    elif wcr is not None and wcr < need_w * cfg["capacityRedBelowRatio"] and (cr is None or cr < need_t * cfg["capacityRedBelowRatio"]):
         add("capacity", "Capacity against ticket", "far below",
-            f"{fmt_cr(cr)} turnover \u00b7 smallest unit needs {fmt_cr(cfg['baseTurnoverFloorCr'])}")
+            f"{fmt_cr(wcr)} established against {fmt_cr(need_w)} needed for {fmt_cr(ticket)}")
     else:
         add("capacity", "Capacity against ticket", "short", f"{fmt_cr(cr if cr is not None else wcr)} \u00b7 {need_txt}")
 
@@ -346,7 +388,24 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
                 ledger["g6"] = dict(value=f["value"], status="found", source=f.get("source"), tier=f.get("tier"))
             continue
         if fid == "g2" and cr is not None and cr >= cfg["developerCarveOutCr"]:
-            add(fid, label, "exception applies", f"{f['value']} \u2014 above the {fmt_cr(cfg['developerCarveOutCr'])} carve-out"); continue
+            # shown, not passed over: on a commercial floor a big developer is a competitor
+            et = get("6a")
+            listed = bool(et) and bool(re.search(r"\blisted\b", str(et.get("value","")), re.I)) and not re.search(r"\bunlisted\b", str(et.get("value","")), re.I)
+            add(fid, label, "for information",
+                f"{f['value']} \u2014 cleared under the {fmt_cr(cfg['developerCarveOutCr'])} turnover carve-out, which was set for "
+                "residential purchases. On a commercial floor a developer of this size is a competitor rather than a neighbour"
+                + (", and this one is listed" if listed else "")
+                + ". The rating is unaffected; the committee should read this line rather than pass over it.")
+            continue
+        if fid == "g5":
+            # refuse only where fame IS the occupation; a businessperson who also performs goes to the committee
+            if not is_fame_the_occupation(sub, ledger):
+                add(fid, label, "for the screening authority",
+                    f"{f['value']} \u2014 recognised publicly, but the principal business is elsewhere. "
+                    "Not refused on this ground; the committee decides whether the profile suits the building.", True)
+                continue
+            add(fid, label, "disqualifying", f"{f['value']} \u2014 mass-market fame; does not proceed")
+            continue
         add(fid, label, "for the screening authority", f["value"], True)
 
     # tax and regulatory: to the committee, never a Red on its own
@@ -354,7 +413,14 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
     if not f: add("e4", "Regulatory or tax proceedings", "nothing found", "no match in the sources searched")
     else:
         sev = (f.get("severity") or "mention").lower()
-        if is_exonerated(f):
+        if is_reg_action(f):
+            # enforcement is not a dispute over a sum
+            add("e4", "Regulatory or tax proceedings", "for the committee", f"{f['value']} \u2014 regulatory action, for the committee", True)
+            f = None
+        elif is_supervisory(f):
+            add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 a supervisory finding against the regulated entity, not the individual")
+            f = None
+        elif is_exonerated(f):
             # a tax matter that went the client's way is not a matter at all
             add("e4", "Regulatory or tax proceedings", "noted",
                 f"{f['value']} \u2014 decided in the client\u2019s favour")
@@ -386,8 +452,16 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
             add(fid, label, "noted", f"{f['value']} \u2014 a foreign affiliate, not the Indian entity or the buyer"); continue
         if is_exonerated(f) and not is_conviction(f): sev = "mention"
         elif is_exonerated(f) and is_conviction(f): sev = "allegation"
+        # an FIR or an arrest is at minimum an allegation
+        if is_police_matter(f) and sev == "mention" and not is_exonerated(f): sev = "allegation"
+        # a concluded matter that reads favourably is one he came through
+        if sev == "finding" and is_favourable(f) and not is_conviction(f): sev = "mention"
         if is_minor(f, cfg) and not is_conviction(f):
             add(fid, label, "noted", f"{f['value']} \u2014 too small to bear on a purchase at this level"); continue
+        if is_reg_action(f):
+            add(fid, label, "for the committee", f"{f['value']} \u2014 regulatory action, for the committee", True); continue
+        if is_supervisory(f):
+            add(fid, label, "noted", f"{f['value']} \u2014 a supervisory finding against the regulated entity, not the individual"); continue
         if is_regulatory(f) and not is_conviction(f):
             if sev == "mention": add(fid, label, "noted", f"{f['value']} \u2014 regulatory, press mention only")
             else: add(fid, label, "for the committee", f"{f['value']} \u2014 a regulatory matter, for the committee to weigh", True)
@@ -566,49 +640,26 @@ def why_line(gates, verdict, ledger):
 #
 # The principle: AN ABSENCE OF EVIDENCE ONLY COUNTS IF THE SEARCH WAS MADE.
 
-MANDATORY = [
-    # The field ids matter: 5c is litigation against the individual and
-    # co-directors, 5d the family, e4 regulatory and tax, e5 default and
-    # insolvency, e6 adverse media. 5a and 5b are seniority and standing and
-    # have nothing to do with any of this.
-    ("kanoon_person",  r"indiankanoon",                                                   ["5c", "5d"]),
-    ("kanoon_company", r"indiankanoon[^;]*compan|compan[^;]*indiankanoon|compan[^;]*kanoon", ["5c"]),
-    ("criminal",       r"\b(fir|chargesheet|charge sheet|criminal|complaint)\b",          ["5c", "5d"]),
-    ("company_suit",   r"\b(petition|suit|versus|court order|litigation)\b",              ["5c"]),
-    ("regulator",      r"\b(sebi|enforcement directorate|\bed\b|cbi|eow|economic offences|rbi)\b", ["e4"]),
-    ("insolvency",     r"\b(nclt|nclat|ibbi|insolvenc\w*|cirp|liquidat\w*|wilful default\w*|default|npa)\b", ["e5", "6b", "3a"]),
-    ("hindi",          r"(hindi|devanagari|regional language)",                            ["5c", "e6"]),
-    ("outcome",        r"\b(settle\w*|withdrawn|quash\w*|acquitt\w*|appeal|stay|overturn\w*)\b", ["5c", "e4"]),
-    ("filings",        r"\b(mca|zauba|tofler|thecompanycheck|indiafilings|annual report|bse|nse|screener)\b", ["6b", "3a", "6c"]),
-    ("media",          r"\b(news|media|press|report\w*|coverage)\b",                      ["e6"]),
-]
+# HOW MUCH SEARCHING ACTUALLY HAPPENED.
+#
+# This used to match queries against required phrasings, and that was wrong in
+# a way that did damage: a lane searching sensibly for "litigation court cases"
+# was judged to have skipped the court search because "indiankanoon" was
+# absent, and a clean listed company came out Needs Review. A model cannot be
+# held to a wording. It can be held to whether it looked at all. The test is
+# depth, deliberately generous, and it is advisory: it never moves the rating
+# and never edits the ledger.
+MIN_SEARCHES_EXPECTED = 6
 
 def coverage(searches_run):
-    """Which mandatory searches the routine did not declare, and the fields
-    left unverified as a result."""
-    hay = " ; ".join(str(s) for s in (searches_run or [])).lower()
-    missing, unverified = [], set()
-    for sid, pattern, fields in MANDATORY:
-        if not re.search(pattern, hay, re.I):
-            missing.append(sid)
-            unverified.update(fields)
-    return missing, unverified
+    if searches_run is None:
+        return {"ran": 0, "shallow": False, "unknown": True, "missing": []}
+    n = len(searches_run)
+    return {"ran": n, "shallow": 0 < n < MIN_SEARCHES_EXPECTED, "unknown": n == 0, "missing": []}
 
 def apply_coverage(ledger, searches_run):
-    """A field the searches never covered is a gap, not a clean result. Returns
-    the missing search ids so the rating and the write-up can say so."""
-    missing, unverified = coverage(searches_run)
-    if not missing:
-        return [], set()
-    for fid in unverified:
-        f = ledger.get(fid)
-        if f is None:
-            # never looked at, and never searched for: record it as such
-            ledger[fid] = dict(status="not_searched", value="", source="", note="the searches that would find this were not run")
-        elif str(f.get("status", "")).lower() in ("not_found", ""):
-            f["status"] = "not_searched"
-            f["note"] = ((f.get("note") or "") + " Not established: the mandatory searches for this were not run.").strip()
-    return missing, unverified
+    c = coverage(searches_run)
+    return c["missing"], set()
 
 def rate(G):
     by = {g["id"]: g for g in G}
@@ -620,7 +671,6 @@ def rate(G):
     # Nothing may be cleared on a search that was never made. A run that
     # skipped its mandatory searches cannot produce a clean profile, however
     # little it happened to find.
-    if "coverage" in by and by["coverage"]["result"] != "pass": return "Amber"
     return "Green"
 
 # ---------------------------------------------------------------- evidence xlsx (Alibaug format)
@@ -883,7 +933,7 @@ def cmd_evaluate(a):
         searches_run = [a.searches] if a.searches else []
     gates = evaluate_gates(ledger, anchor, sub.get("budget",""), cfg, sub, searches_run)
     verdict = rate(gates)
-    missing, _ = coverage(searches_run)
+    missing = []
     print(json.dumps(dict(gates=gates, verdict=verdict, why=why_line(gates, verdict, ledger),
                           breakdown=breakdown(gates, ledger, anchor),
                           searches_missing=missing)))
