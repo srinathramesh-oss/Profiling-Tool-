@@ -322,6 +322,11 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
     turn = get("6b");  cr  = cr_from(turn["value"]) if turn else None
     vehicle = is_investment_vehicle(sub, ledger)
     if vehicle: cr = None
+    # A professional manager is not his employer. The company's revenue is not
+    # his money, and (below) the company's record is not his record.
+    employed = bool(turn) and bool(re.search(
+        r"\b(employed|salaried|professional manager|not an owner|no promoter stake|hired)\b", _txt(turn), re.I))
+    if employed: cr = None
     worth = get("3a"); wcr = cr_from(worth["value"]) if worth else None
     liq = get("d2");   liq_cr = cr_from(liq["value"]) if liq else None
     if liq_cr is not None and (wcr is None or liq_cr > wcr): wcr = liq_cr
@@ -348,6 +353,10 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
 
     if routes:
         add("capacity", "Capacity against ticket", "pass", ", ".join(routes) + " \u00b7 " + need_txt)
+    elif employed and wcr is None:
+        add("capacity", "Capacity against ticket", "Not established",
+            f"runs {turn['value']} as a professional manager, not an owner \u2014 the company\u2019s revenue is not his, "
+            "so his own means must be established in the meeting")
     elif best:
         add("capacity", "Capacity against ticket", "qualifies lower",
             f"supports {best[0]}, not the {fmt_cr(ticket)} asked for", True)
@@ -430,11 +439,11 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
         bar = max(cfg["taxMaterialityCr"], (tn * cfg["taxMaterialityPctOfTurnover"] / 100) if tn is not None else 0)
         if f is None:
             pass
-        elif not is_serious_tax(f) and amt is None:
+        elif not is_serious_tax(f) and not REG_SUBSTANTIVE.search(_txt(f)) and amt is None:
             # a dispute with no sum attached cannot be weighed, so it is ordinary
             add("e4", "Regulatory or tax proceedings", "noted",
                 f"{f['value']} \u2014 no sum stated, treated as an ordinary dispute")
-        elif not is_serious_tax(f) and amt is not None and amt < bar:
+        elif not is_serious_tax(f) and not REG_SUBSTANTIVE.search(_txt(f)) and amt is not None and amt < bar:
             add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 small against the size of the business")
         elif sev == "mention": add("e4", "Regulatory or tax proceedings", "noted", f"{f['value']} \u2014 press mention only")
         else: add("e4", "Regulatory or tax proceedings", "for the committee",
@@ -445,7 +454,8 @@ def evaluate_gates(ledger, anchor, budget, cfg, sub=None, searches_run=None):
         f = get(fid)
         if not f: add(fid, label, "nothing found", "no match in the sources searched"); continue
         sev = (f.get("severity") or "mention").lower(); about = (f.get("about") or "subject").lower()
-        own = about in ("subject", "company")
+        # a company finding belongs to the owner, not to someone hired to run it
+        own = about == "subject" or (about == "company" and not employed)
         if is_conviction(f) and not is_tax(f): sev = "finding"
         if sev == "finding" and is_weak_source(f): sev = "allegation"
         if is_foreign_affiliate(f):
